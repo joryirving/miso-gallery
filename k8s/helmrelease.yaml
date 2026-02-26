@@ -1,0 +1,75 @@
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: miso-gallery
+spec:
+  interval: h1
+  chart:
+    spec:
+      chart: app-template
+      version: 3.0.0
+      sourceRef:
+        kind: HelmRepository
+        name: bjw-s
+        namespace: flux-system
+  values:
+    controllers:
+      miso-gallery:
+        type: deployment
+        replicas: 1
+        containers:
+          miso-gallery:
+            image: ghcr.io/joryirving/miso-gallery:latest
+            imagePullPolicy: IfNotPresent
+            env:
+              - name: DATA_FOLDER
+                value: /data
+              - name: IMAGE_BASE_URL
+                value: "https://comfy-output.jory.dev/images"
+              - name: PORT
+                value: "5000"
+            probes:
+              liveness:
+                enabled: true
+                custom: true
+                spec:
+                  httpGet:
+                    path: /
+                    port: 5000
+              readiness:
+                enabled: true
+                custom: true
+                  spec:
+                    httpGet:
+                      path: /
+                      port: 5000
+        volumes:
+          data:
+            type: persistentVolumeClaim
+            name: miso-gallery-data
+            mountPath: /data
+    service:
+      ports:
+        - port: 5000
+          targetPort: 5000
+          name: http
+    ingress:
+      enabled: true
+      className: nginx
+      hosts:
+        - host: miso-gallery.jory.dev
+          paths:
+            - path: /
+              pathType: Prefix
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: miso-gallery-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
