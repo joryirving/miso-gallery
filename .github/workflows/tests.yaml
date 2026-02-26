@@ -1,0 +1,56 @@
+---
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest requests
+
+      - name: Create test images directory
+        run: mkdir -p /tmp/test_images
+
+      - name: Create test image
+        run: |
+          python3 -c "
+          from PIL import Image
+          img = Image.new('RGB', (100, 100), color='red')
+          img.save('/tmp/test_images/test.png')
+          "
+
+      - name: Run container
+        run: |
+          docker run -d --name gallery -p 5000:5000 -v /tmp/test_images:/data ghcr.io/${{ github.repository }}:latest || true
+          sleep 5
+
+      - name: Run tests
+        run: |
+          sleep 2
+          curl -f http://localhost:5000/ || exit 1
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f gallery || true
