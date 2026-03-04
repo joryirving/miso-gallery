@@ -28,10 +28,34 @@ HTML_TEMPLATE = '''
             justify-content: space-between;
             align-items: center;
             border-bottom: 1px solid #333;
+            gap: 12px;
+            flex-wrap: wrap;
         }
         h1 { font-size: 1.5rem; background: linear-gradient(90deg, #f5a623, #f76c1c); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-left: auto;
+        }
         .breadcrumb { color: #888; font-size: 0.9rem; }
         .breadcrumb a { color: #f5a623; text-decoration: none; }
+        .refresh-btn {
+            background: linear-gradient(135deg, #2f2f4f 0%, #243357 100%);
+            color: #f5a623;
+            border: 1px solid #4b4b75;
+            border-radius: 8px;
+            padding: 8px 12px;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: transform 0.15s, border-color 0.2s, box-shadow 0.2s;
+            white-space: nowrap;
+        }
+        .refresh-btn:hover {
+            border-color: #f5a623;
+            box-shadow: 0 6px 18px rgba(245, 166, 35, 0.22);
+            transform: translateY(-1px);
+        }
         .container { padding: 20px; }
         .grid {
             display: grid;
@@ -96,7 +120,10 @@ HTML_TEMPLATE = '''
 <body>
     <header>
         <h1>🍲 Miso Gallery</h1>
-        <div class="breadcrumb">{{ breadcrumb|safe }}</div>
+        <div class="header-actions">
+            <div class="breadcrumb">{{ breadcrumb|safe }}</div>
+            <button type="button" id="refreshBtn" class="refresh-btn" title="Refresh current folder">↻ Refresh</button>
+        </div>
     </header>
     <div class="container">
         {% if items %}
@@ -128,6 +155,12 @@ HTML_TEMPLATE = '''
         {% endif %}
         <div class="stats">{{ stats.folders }} folders • {{ stats.images }} images</div>
     </div>
+    <script>
+        const refreshBtn = document.getElementById('refreshBtn');
+        if (refreshBtn) {
+            refreshBtn.addEventListener('click', () => window.location.reload());
+        }
+    </script>
 </body>
 </html>
 '''
