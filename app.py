@@ -1,4 +1,5 @@
 from flask import Flask, render_template_string, request, redirect, url_for, send_from_directory, abort
+import io
 import os
 from PIL import Image, UnidentifiedImageError
 
@@ -14,6 +15,8 @@ HTML_TEMPLATE = '''
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="/favicon.ico">
+    <link rel="icon" type="image/png" href="https://comfy-output.jory.dev/images/chibi/Miso_1772668503_chibi_photo_00001_.png">
     <title>Miso Gallery</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -30,10 +33,34 @@ HTML_TEMPLATE = '''
             justify-content: space-between;
             align-items: center;
             border-bottom: 1px solid #333;
+            gap: 12px;
+            flex-wrap: wrap;
         }
         h1 { font-size: 1.5rem; background: linear-gradient(90deg, #f5a623, #f76c1c); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-left: auto;
+        }
         .breadcrumb { color: #888; font-size: 0.9rem; }
         .breadcrumb a { color: #f5a623; text-decoration: none; }
+        .refresh-btn {
+            background: linear-gradient(135deg, #2f2f4f 0%, #243357 100%);
+            color: #f5a623;
+            border: 1px solid #4b4b75;
+            border-radius: 8px;
+            padding: 8px 12px;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: transform 0.15s, border-color 0.2s, box-shadow 0.2s;
+            white-space: nowrap;
+        }
+        .refresh-btn:hover {
+            border-color: #f5a623;
+            box-shadow: 0 6px 18px rgba(245, 166, 35, 0.22);
+            transform: translateY(-1px);
+        }
         .container { padding: 20px; }
         .toolbar {
             display: flex;
@@ -137,7 +164,10 @@ HTML_TEMPLATE = '''
 <body>
     <header>
         <h1>🍲 Miso Gallery</h1>
-        <div class="breadcrumb">{{ breadcrumb|safe }}</div>
+        <div class="header-actions">
+            <div class="breadcrumb">{{ breadcrumb|safe }}</div>
+            <button type="button" id="refreshBtn" class="refresh-btn" title="Refresh current folder">↻ Refresh</button>
+        </div>
     </header>
     <div class="container">
         {% if items %}
@@ -177,6 +207,11 @@ HTML_TEMPLATE = '''
         <div class="stats">{{ stats.folders }} folders • {{ stats.images }} images</div>
     </div>
     <script>
+        const refreshBtn = document.getElementById('refreshBtn');
+        if (refreshBtn) {
+            refreshBtn.addEventListener('click', () => window.location.reload());
+        }
+        
         function getSelectors() {
             return Array.from(document.querySelectorAll('input.selector[name="filenames"]'));
         }
@@ -270,7 +305,27 @@ def remove_thumbnail_cache_for(rel_path: str):
 
 
 @app.route('/')
+@app.route("/favicon.ico")
+def favicon():
+    import io
+    from PIL import Image
+    img = Image.open("/../favicon.png").convert("RGB")
+    img = img.resize((32, 32))
+    buf = io.BytesIO()
+    img.save(buf, "ICO")
+    buf.seek(0)
+    return buf.getvalue(), 200, {"Content-Type": "image/x-icon"}
 @app.route('/<path:subpath>')
+@app.route("/favicon.ico")
+def favicon():
+    import io
+    from PIL import Image
+    img = Image.open("/../favicon.png").convert("RGB")
+    img = img.resize((32, 32))
+    buf = io.BytesIO()
+    img.save(buf, "ICO")
+    buf.seek(0)
+    return buf.getvalue(), 200, {"Content-Type": "image/x-icon"}
 def index(subpath=''):
     safe_subpath = sanitize_rel_path(subpath) if subpath else ''
     folder_path = os.path.join(DATA_FOLDER, safe_subpath)
@@ -332,6 +387,16 @@ def index(subpath=''):
 
 
 @app.route('/thumb/<path:filename>')
+@app.route("/favicon.ico")
+def favicon():
+    import io
+    from PIL import Image
+    img = Image.open("/../favicon.png").convert("RGB")
+    img = img.resize((32, 32))
+    buf = io.BytesIO()
+    img.save(buf, "ICO")
+    buf.seek(0)
+    return buf.getvalue(), 200, {"Content-Type": "image/x-icon"}
 def thumb(filename):
     rel_path = sanitize_rel_path(filename)
     source_path = source_file_path(rel_path)
@@ -353,12 +418,32 @@ def thumb(filename):
 
 
 @app.route('/view/<path:filename>')
+@app.route("/favicon.ico")
+def favicon():
+    import io
+    from PIL import Image
+    img = Image.open("/../favicon.png").convert("RGB")
+    img = img.resize((32, 32))
+    buf = io.BytesIO()
+    img.save(buf, "ICO")
+    buf.seek(0)
+    return buf.getvalue(), 200, {"Content-Type": "image/x-icon"}
 def view(filename):
     rel_path = sanitize_rel_path(filename)
     return send_from_directory(DATA_FOLDER, rel_path)
 
 
 @app.route('/delete/<path:filename>', methods=['POST'])
+@app.route("/favicon.ico")
+def favicon():
+    import io
+    from PIL import Image
+    img = Image.open("/../favicon.png").convert("RGB")
+    img = img.resize((32, 32))
+    buf = io.BytesIO()
+    img.save(buf, "ICO")
+    buf.seek(0)
+    return buf.getvalue(), 200, {"Content-Type": "image/x-icon"}
 def delete(filename):
     rel_path = sanitize_rel_path(filename)
     file_path = source_file_path(rel_path)
