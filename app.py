@@ -14,6 +14,7 @@ HTML_TEMPLATE = '''
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" href="/favicon.ico">
+    <link rel="icon" type="image/png" href="https://comfy-output.jory.dev/images/chibi/Miso_1772668503_chibi_photo_00001_.png">
     <title>Miso Gallery</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
