@@ -9,7 +9,7 @@ Supports multiple auth methods:
 Environment Variables:
 ---------------------
 # Auth method selection
-AUTH_TYPE=local|oidc|none  (default: none)
+AUTH_TYPE=local|oidc|none  (default: local)
 
 # Local auth
 ADMIN_PASSWORD=your-password
@@ -29,7 +29,7 @@ from functools import wraps
 from flask import session, redirect, url_for, request, flash
 
 # Config
-AUTH_TYPE = os.environ.get('AUTH_TYPE', 'none').lower()
+AUTH_TYPE = os.environ.get('AUTH_TYPE', 'local').lower()
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', '')
 SECRET_KEY = os.environ.get('SECRET_KEY', os.urandom(32))
 
