@@ -3,8 +3,10 @@ import io
 import os
 from PIL import Image, UnidentifiedImageError
 
+from security import rate_limit, sanitize_path, add_security_headers
 from auth import require_auth, is_auth_enabled, AUTH_TYPE, ADMIN_PASSWORD, OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, OIDC_CALLBACK_URL
 app = Flask(__name__)
+app.after_request(add_security_headers)
 app.secret_key = os.environ.get('SECRET_KEY', os.urandom(32))
 DATA_FOLDER = os.environ.get('DATA_FOLDER', '/data')
 THUMBNAIL_CACHE_DIR = os.path.join(DATA_FOLDER, '.thumb_cache')
@@ -447,6 +449,8 @@ def favicon():
     buf.seek(0)
     return buf.getvalue(), 200, {"Content-Type": "image/x-icon"}
 def delete(filename):
+    if not sanitize_path(filename):
+        return {"error": "Invalid filename"}, 400
     rel_path = sanitize_rel_path(filename)
     file_path = source_file_path(rel_path)
 
@@ -460,6 +464,12 @@ def delete(filename):
 
 @app.route('/bulk-delete', methods=['POST'])
 def bulk_delete():
+    # Validate filenames
+    data = request.get_json() or {}
+    filenames = data.get("filenames", [])
+    for fn in filenames:
+        if not sanitize_path(fn):
+            return {"error": "Invalid filename"}, 400
     current_subpath = sanitize_rel_path(request.form.get('current_subpath', '')) if request.form.get('current_subpath') else ''
     selected = request.form.getlist('filenames')
 
