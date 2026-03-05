@@ -1,0 +1,12 @@
+# Default owners for all files
+* @joryirving
+
+# Workflows and release automation
+.github/workflows/* @joryirving
+
+# Application/security critical files
+app.py @joryirving
+auth.py @joryirving
+security.py @joryirving
+Dockerfile @joryirving
+requirements.txt @joryirving
