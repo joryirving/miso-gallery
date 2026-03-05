@@ -350,6 +350,11 @@ def check_auth():
 def favicon():
     if FAVICON_URL:
         return redirect(FAVICON_URL)
+
+    logo_path = Path(app.root_path) / "assets" / "miso-gallery-logo.png"
+    if logo_path.exists():
+        return send_from_directory(str(logo_path.parent), logo_path.name)
+
     return ("", 204)
 
 
