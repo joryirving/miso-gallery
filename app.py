@@ -1,4 +1,5 @@
 from flask import Flask, render_template_string, request, redirect, url_for, send_from_directory
+import io
 import os
 import subprocess
 from pathlib import Path
@@ -12,6 +13,7 @@ HTML_TEMPLATE = '''
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="/favicon.ico">
     <title>Miso Gallery</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -171,7 +173,27 @@ def get_image_url(filename):
     return f"{base}/{filename}"
 
 @app.route('/')
+@app.route("/favicon.ico")
+def favicon():
+    import io
+    from PIL import Image
+    img = Image.open("/../favicon.png").convert("RGB")
+    img = img.resize((32, 32))
+    buf = io.BytesIO()
+    img.save(buf, "ICO")
+    buf.seek(0)
+    return buf.getvalue(), 200, {"Content-Type": "image/x-icon"}
 @app.route('/<path:subpath>')
+@app.route("/favicon.ico")
+def favicon():
+    import io
+    from PIL import Image
+    img = Image.open("/../favicon.png").convert("RGB")
+    img = img.resize((32, 32))
+    buf = io.BytesIO()
+    img.save(buf, "ICO")
+    buf.seek(0)
+    return buf.getvalue(), 200, {"Content-Type": "image/x-icon"}
 def index(subpath=''):
     folder_path = os.path.join(DATA_FOLDER, subpath)
     
@@ -223,14 +245,44 @@ def index(subpath=''):
     return render_template_string(HTML_TEMPLATE, items=items, breadcrumb=breadcrumb, stats=stats)
 
 @app.route('/thumb/<path:filename>')
+@app.route("/favicon.ico")
+def favicon():
+    import io
+    from PIL import Image
+    img = Image.open("/../favicon.png").convert("RGB")
+    img = img.resize((32, 32))
+    buf = io.BytesIO()
+    img.save(buf, "ICO")
+    buf.seek(0)
+    return buf.getvalue(), 200, {"Content-Type": "image/x-icon"}
 def thumb(filename):
     return send_from_directory(DATA_FOLDER, filename)
 
 @app.route('/view/<path:filename>')
+@app.route("/favicon.ico")
+def favicon():
+    import io
+    from PIL import Image
+    img = Image.open("/../favicon.png").convert("RGB")
+    img = img.resize((32, 32))
+    buf = io.BytesIO()
+    img.save(buf, "ICO")
+    buf.seek(0)
+    return buf.getvalue(), 200, {"Content-Type": "image/x-icon"}
 def view(filename):
     return send_from_directory(DATA_FOLDER, filename)
 
 @app.route('/delete/<path:filename>', methods=['POST'])
+@app.route("/favicon.ico")
+def favicon():
+    import io
+    from PIL import Image
+    img = Image.open("/../favicon.png").convert("RGB")
+    img = img.resize((32, 32))
+    buf = io.BytesIO()
+    img.save(buf, "ICO")
+    buf.seek(0)
+    return buf.getvalue(), 200, {"Content-Type": "image/x-icon"}
 def delete(filename):
     file_path = os.path.join(DATA_FOLDER, filename)
     if os.path.exists(file_path):
