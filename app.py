@@ -786,13 +786,20 @@ def recent_view():
 
     max_items = 50
     images = []
+    excluded_dirs = {THUMBNAIL_CACHE_DIR.name, ".trash"}
 
     def is_image(path: Path) -> bool:
         return path.suffix.lower() in IMAGE_EXTENSIONS
 
+    def is_excluded_from_recent(path: Path) -> bool:
+        rel_parts = path.relative_to(DATA_FOLDER).parts
+        return any(part in excluded_dirs for part in rel_parts)
+
     try:
         for item in DATA_FOLDER.rglob("*"):
             if not item.is_file() or not is_image(item):
+                continue
+            if is_excluded_from_recent(item):
                 continue
             if item.name.startswith("."):
                 continue
