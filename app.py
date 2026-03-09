@@ -65,6 +65,37 @@ app = Flask(__name__)
 app.secret_key = resolve_secret_key()
 app.after_request(add_security_headers)
 
+
+def _client_ip() -> str | None:
+    forwarded = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+    return forwarded or request.remote_addr
+
+
+def log_security_event(event: str, outcome: str, **fields: object) -> None:
+    """Emit a structured log line for security/access events.
+
+    Intentionally avoids logging secrets (passwords, OIDC tokens, raw userinfo).
+    """
+
+    try:
+        payload: dict[str, object] = {
+            "event": event,
+            "outcome": outcome,
+            "path": request.path,
+            "method": request.method,
+            "remote_addr": _client_ip(),
+            "user_id": session.get("user_id"),
+            "user_name": session.get("user_name"),
+            "auth_method": session.get("auth_method") or ("local" if session.get("authenticated") else None),
+        }
+        payload.update(fields)
+        payload = {k: v for k, v in payload.items() if v is not None}
+        app.logger.info(json.dumps(payload, separators=(",", ":"), sort_keys=True))
+    except Exception:
+        # Never break request handling due to logging
+        return
+
+
 # Configure OAuth for OIDC if enabled
 configure_oauth(app)
 THUMBNAIL_SIZE = (400, 400)
@@ -870,15 +901,25 @@ def view(filename: str):
 @rate_limit(max_requests=30, window=60)
 def delete(filename: str):
     if not sanitize_path(filename):
+        log_security_event("delete", "denied", reason="invalid_filename")
         return {"error": "Invalid filename"}, 400
     if not validate_csrf(request.form.get("csrf_token")):
+        log_security_event("delete", "denied", reason="invalid_csrf")
         return {"error": "Invalid CSRF token"}, 403
 
     rel_path = sanitize_rel_path(filename)
     file_path = source_file_path(rel_path)
+
+    outcome = "not_found"
     if file_path.exists() and file_path.is_file():
-        if move_to_trash(file_path, DATA_FOLDER):
+        moved = move_to_trash(file_path, DATA_FOLDER)
+        if moved:
             remove_thumbnail_cache_for(rel_path)
+            outcome = "success"
+        else:
+            outcome = "error"
+
+    log_security_event("delete", outcome, target=rel_path)
 
     folder = os.path.dirname(rel_path)
     return redirect(url_for("index", subpath=folder if folder else ""))
@@ -889,11 +930,15 @@ def delete(filename: str):
 @rate_limit(max_requests=20, window=60)
 def bulk_delete():
     if not validate_csrf(request.form.get("csrf_token")):
+        log_security_event("bulk_delete", "denied", reason="invalid_csrf")
         return {"error": "Invalid CSRF token"}, 403
 
     current_subpath = sanitize_rel_path(request.form.get("current_subpath", "")) if request.form.get("current_subpath") else ""
     selected_files = request.form.getlist("filenames")
     selected_folders = request.form.getlist("folders")
+
+    moved_files = 0
+    moved_folders = 0
 
     # Delete selected files
     for rel_path in selected_files:
@@ -903,6 +948,7 @@ def bulk_delete():
         file_path = source_file_path(safe_rel_path)
         if file_path.exists() and file_path.is_file():
             if move_to_trash(file_path, DATA_FOLDER):
+                moved_files += 1
                 remove_thumbnail_cache_for(safe_rel_path)
 
     # Delete selected folders
@@ -913,7 +959,19 @@ def bulk_delete():
         folder_path = DATA_FOLDER / safe_rel_path
         if folder_path.exists() and folder_path.is_dir():
             if move_to_trash(folder_path, DATA_FOLDER):
+                moved_folders += 1
                 remove_thumbnail_cache_for(safe_rel_path)
+
+    outcome = "success" if (moved_files or moved_folders) else "noop"
+    log_security_event(
+        "bulk_delete",
+        outcome,
+        selected_files=len(selected_files),
+        selected_folders=len(selected_folders),
+        moved_files=moved_files,
+        moved_folders=moved_folders,
+        current_subpath=current_subpath,
+    )
 
     return redirect(url_for("index", subpath=current_subpath))
 
@@ -984,8 +1042,11 @@ def trash_view():
 @rate_limit(max_requests=20, window=60)
 def trash_restore(item_name: str):
     if not validate_csrf(request.form.get("csrf_token")):
+        log_security_event("trash_restore", "denied", reason="invalid_csrf")
         return {"error": "Invalid CSRF token"}, 403
-    restore_from_trash(item_name, DATA_FOLDER)
+
+    restored = restore_from_trash(item_name, DATA_FOLDER)
+    log_security_event("trash_restore", "success" if restored else "not_found", item=item_name)
     return redirect(url_for("trash_view"))
 
 
@@ -994,8 +1055,11 @@ def trash_restore(item_name: str):
 @rate_limit(max_requests=5, window=60)
 def trash_empty():
     if not validate_csrf(request.form.get("csrf_token")):
+        log_security_event("trash_empty", "denied", reason="invalid_csrf")
         return {"error": "Invalid CSRF token"}, 403
-    empty_trash(DATA_FOLDER)
+
+    deleted = empty_trash(DATA_FOLDER)
+    log_security_event("trash_empty", "success", deleted=deleted)
     return redirect(url_for("trash_view"))
 
 
@@ -1053,13 +1117,17 @@ def auth():
     password = request.form.get("password", "")
     if verify_local_password(password):
         session["authenticated"] = True
+        session["auth_method"] = "local"
+        log_security_event("login", "success", auth_method="local")
         return redirect(next_url)
 
+    log_security_event("login", "failure", auth_method="local", reason="invalid_password")
     return redirect(url_for("login", error="invalid", next=next_url))
 
 
 @app.route("/logout")
 def logout():
+    log_security_event("logout", "success")
     session.clear()
     return redirect(url_for("login", next="/"))
 
@@ -1135,12 +1203,14 @@ def oidc_callback():
         session["user_name"] = user_name
         session["auth_method"] = "oidc"
 
+        log_security_event("login", "success", auth_method="oidc")
+
         # Redirect to the stored next URL or index
         next_url = session.pop("oidc_next_url", None) or url_for("index")
         return redirect(next_url)
 
     except Exception as e:
-        app.logger.error(f"OIDC callback error: {e}")
+        log_security_event("login", "error", auth_method="oidc", error=type(e).__name__)
         next_url = session.pop("oidc_next_url", None) or "/"
         return redirect(url_for("login", error="oidc_failed", next=next_url))
 
