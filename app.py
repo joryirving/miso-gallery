@@ -5,6 +5,7 @@ import os
 import secrets
 import shlex
 import subprocess
+import time
 from pathlib import Path
 
 from flask import (
@@ -120,6 +121,9 @@ PWA_THEME_COLOR = "#0d0d0d"
 PWA_APP_NAME = "Miso Gallery"
 APP_VERSION = (os.environ.get("APP_VERSION") or "v0.1.x").strip() or "v0.1.x"
 WEBHOOK_TASK_PREFIX = "WEBHOOK_TASK_"
+AUTO_FOLDER_COVERS_ENABLED = os.environ.get("GALLERY_AUTO_FOLDER_COVERS", "false").strip().lower() in {"1", "true", "yes", "on"}
+FOLDER_COVER_CACHE_TTL = max(int(os.environ.get("GALLERY_COVER_CACHE_TTL", "3600") or 3600), 0)
+_FOLDER_COVER_CACHE: dict[str, tuple[float, str | None]] = {}
 
 
 def _webhook_enabled() -> bool:
@@ -257,9 +261,10 @@ HTML_TEMPLATE = """
     .folder-card:hover,.image-card:hover { transform:translateY(-3px); box-shadow:0 8px 25px rgba(245,166,35,.15); }
     .folder-card { border:1px dashed #444; }
     .folder-card.selected { border-color:#f5a623; box-shadow:0 0 0 2px rgba(245,166,35,.3); }
-    .folder { display:block; padding:30px; text-align:center; text-decoration:none; }
+    .folder { display:block; padding:30px; text-align:center; text-decoration:none; position:relative; min-height:180px; }
     .folder-icon { font-size:3rem; margin-bottom:10px; }
-    .folder-name { color:#f5a623; font-weight:500; }
+    .folder-preview { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+    .folder-name { color:#f5a623; font-weight:500; position:relative; z-index:1; text-shadow:0 2px 8px rgba(0,0,0,.7); background:rgba(0,0,0,.3); display:inline-block; padding:4px 8px; border-radius:6px; }
     .image-card { position:relative; border:1px solid transparent; }
     .image-card.selected { border-color:#f5a623; box-shadow:0 0 0 2px rgba(245,166,35,.3); }
     .image-card img { width:100%; height:180px; object-fit:cover; display:block; }
@@ -329,7 +334,11 @@ HTML_TEMPLATE = """
             <div class="folder-card" data-folder-card>
               <input class="selector" type="checkbox" name="folders" value="{{ item.rel_path }}" onchange="syncSelectionState()">
               <a href="{{ item.url }}" class="folder">
-                <div class="folder-icon">📁</div>
+                {% if item.cover_thumb_url %}
+                  <img class="folder-preview" src="{{ item.cover_thumb_url }}" alt="{{ item.name }} folder preview" loading="lazy">
+                {% else %}
+                  <div class="folder-icon">📁</div>
+                {% endif %}
                 <div class="folder-name">{{ item.name }}</div>
               </a>
             </div>
@@ -785,6 +794,37 @@ def run_thumbnail_integrity_check() -> dict[str, int]:
     return stats
 
 
+def folder_cover_rel_path(folder_rel_path: str) -> str | None:
+    """Return a cached auto-cover image rel path for a folder, if available."""
+
+    if not AUTO_FOLDER_COVERS_ENABLED:
+        return None
+
+    now = time.time()
+    cached = _FOLDER_COVER_CACHE.get(folder_rel_path)
+    if cached and now - cached[0] < FOLDER_COVER_CACHE_TTL:
+        return cached[1]
+
+    folder_path = DATA_FOLDER / sanitize_rel_path(folder_rel_path) if folder_rel_path else DATA_FOLDER
+    if not folder_path.exists() or not folder_path.is_dir():
+        _FOLDER_COVER_CACHE[folder_rel_path] = (now, None)
+        return None
+
+    cover_rel: str | None = None
+    candidates = sorted(folder_path.rglob("*"), key=lambda p: p.as_posix().lower())
+    for candidate in candidates:
+        if not candidate.is_file() or candidate.suffix.lower() not in IMAGE_EXTENSIONS:
+            continue
+        rel_candidate = candidate.relative_to(DATA_FOLDER)
+        if any(part in {".thumb_cache", ".trash"} or part.startswith(".") for part in rel_candidate.parts):
+            continue
+        cover_rel = rel_candidate.as_posix()
+        break
+
+    _FOLDER_COVER_CACHE[folder_rel_path] = (now, cover_rel)
+    return cover_rel
+
+
 def format_size(size: int) -> str:
     value = float(size)
     for unit in ["B", "KB", "MB", "GB"]:
@@ -906,7 +946,16 @@ def index(subpath: str = ""):
 
         if item.is_dir():
             stats["folders"] += 1
-            items.append({"name": item.name, "url": url_for("index", subpath=rel_path), "is_dir": True})
+            cover_rel_path = folder_cover_rel_path(rel_path)
+            items.append(
+                {
+                    "name": item.name,
+                    "rel_path": rel_path,
+                    "url": url_for("index", subpath=rel_path),
+                    "cover_thumb_url": url_for("thumb", filename=cover_rel_path) if cover_rel_path else None,
+                    "is_dir": True,
+                }
+            )
         elif item.suffix.lower() in IMAGE_EXTENSIONS:
             stats["images"] += 1
             items.append(
