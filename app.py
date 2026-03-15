@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import shlex
+import subprocess
+import time
 from pathlib import Path
 
 from flask import (
@@ -63,16 +66,88 @@ def resolve_secret_key() -> str:
 
 app = Flask(__name__)
 app.secret_key = resolve_secret_key()
+
+# Session persistence configuration for mobile compatibility
+# PERMANENT_SESSION_LIFETIME: 30 days for persistent sessions
+# SESSION_COOKIE_SECURE: Only send over HTTPS (set via env for flexibility)
+# SESSION_COOKIE_SAMESITE: Lax to allow cross-site navigation while maintaining security
+# SESSION_COOKIE_HTTPONLY: Prevent JavaScript access to session cookie
+app.config["PERMANENT_SESSION_LIFETIME"] = int(os.environ.get("SESSION_LIFETIME_DAYS", 30)) * 24 * 60 * 60
+app.config["SESSION_COOKIE_SECURE"] = os.environ.get("SESSION_COOKIE_SECURE", "true").strip().lower() == "true"
+app.config["SESSION_COOKIE_SAMESITE"] = os.environ.get("SESSION_COOKIE_SAMESITE", "Lax")
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_REFRESH_EACH_REQUEST"] = False
+
 app.after_request(add_security_headers)
+
+
+def _client_ip() -> str | None:
+    forwarded = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+    return forwarded or request.remote_addr
+
+
+def log_security_event(event: str, outcome: str, **fields: object) -> None:
+    """Emit a structured log line for security/access events.
+
+    Intentionally avoids logging secrets (passwords, OIDC tokens, raw userinfo).
+    """
+
+    try:
+        payload: dict[str, object] = {
+            "event": event,
+            "outcome": outcome,
+            "path": request.path,
+            "method": request.method,
+            "remote_addr": _client_ip(),
+            "user_id": session.get("user_id"),
+            "user_name": session.get("user_name"),
+            "auth_method": session.get("auth_method") or ("local" if session.get("authenticated") else None),
+        }
+        payload.update(fields)
+        payload = {k: v for k, v in payload.items() if v is not None}
+        app.logger.info(json.dumps(payload, separators=(",", ":"), sort_keys=True))
+    except Exception:
+        # Never break request handling due to logging
+        return
+
 
 # Configure OAuth for OIDC if enabled
 configure_oauth(app)
-THUMBNAIL_SIZE = (400, 400)
+THUMBNAIL_MAX_SIZE = 600
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 FAVICON_URL = os.environ.get("FAVICON_URL", "").strip()
 
 PWA_THEME_COLOR = "#0d0d0d"
 PWA_APP_NAME = "Miso Gallery"
+APP_VERSION = (os.environ.get("APP_VERSION") or "v0.1.x").strip() or "v0.1.x"
+WEBHOOK_TASK_PREFIX = "WEBHOOK_TASK_"
+AUTO_FOLDER_COVERS_ENABLED = os.environ.get("GALLERY_AUTO_FOLDER_COVERS", "false").strip().lower() in {"1", "true", "yes", "on"}
+FOLDER_COVER_CACHE_TTL = max(int(os.environ.get("GALLERY_COVER_CACHE_TTL", "3600") or 3600), 0)
+_FOLDER_COVER_CACHE: dict[str, tuple[float, str | None]] = {}
+
+
+def _webhook_enabled() -> bool:
+    return os.environ.get("WEBHOOK_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _task_env_key(task_name: str) -> str:
+    normalized = "".join(ch if ch.isalnum() else "_" for ch in task_name).strip("_").upper()
+    return f"{WEBHOOK_TASK_PREFIX}{normalized}" if normalized else ""
+
+
+def _render_task_command(template: str, params: dict[str, object]) -> str:
+    rendered = template
+    for key, value in params.items():
+        if isinstance(value, (dict, list)):
+            raise ValueError(f"params.{key} must be a scalar value")
+        rendered = rendered.replace(f"{{params.{key}}}", shlex.quote(str(value)))
+
+    if "{params." in rendered:
+        raise ValueError("missing required params for command template")
+
+    return rendered
+
+
 SERVICE_WORKER_TEMPLATE = """
 const CACHE_VERSION = "miso-gallery-v1";
 const CORE_ASSETS = [
@@ -149,6 +224,9 @@ HTML_TEMPLATE = """
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/assets/icon-192.png">
   <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Miso Gallery">
+  <meta name="mobile-web-app-capable" content="yes">
   <title>Miso Gallery</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -159,6 +237,20 @@ HTML_TEMPLATE = """
     .breadcrumb { color:#888; font-size:0.9rem; }
     .breadcrumb a { color:#f5a623; text-decoration:none; }
     .refresh-btn { background:linear-gradient(135deg,#2f2f4f 0%,#243357 100%); color:#f5a623; border:1px solid #4b4b75; border-radius:8px; padding:8px 12px; font-size:0.9rem; cursor:pointer; }
+    .nav-toggle { background:linear-gradient(135deg,#2f2f4f 0%,#243357 100%); color:#f5a623; border:1px solid #4b4b75; border-radius:10px; padding:10px 12px; font-size:1rem; cursor:pointer; line-height:1; }
+    .drawer-overlay { position:fixed; inset:0; background:rgba(0,0,0,.55); opacity:0; pointer-events:none; transition:opacity .2s ease; z-index:999; }
+    .drawer-overlay.open { opacity:1; pointer-events:auto; }
+    .drawer { position:fixed; top:0; left:0; height:100vh; width:300px; max-width:85vw; background:#121217; border-right:1px solid #2f2f2f; transform:translateX(-105%); transition:transform .2s ease; z-index:1000; padding:16px; display:flex; flex-direction:column; gap:14px; }
+    .drawer.open { transform:translateX(0); }
+    .drawer-header { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    .drawer-brand { font-weight:700; color:#f5a623; }
+    .drawer-close { background:transparent; border:1px solid #333; color:#ddd; border-radius:10px; padding:8px 10px; cursor:pointer; }
+    .drawer-path { color:#9aa1a8; font-size:.9rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .drawer-links { display:flex; flex-direction:column; gap:6px; }
+    .drawer-links a { display:block; padding:10px 10px; border-radius:10px; text-decoration:none; color:#e0e0e0; border:1px solid transparent; }
+    .drawer-links a:hover { background:#1b1b26; border-color:#2c2c3a; }
+    .drawer-links a.current { border-color:rgba(245,166,35,.35); background:rgba(245,166,35,.08); }
+    .drawer-divider { height:1px; background:#2a2a2a; margin:6px 0; }
     .container { padding:20px; }
     .toolbar { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:15px; }
     .toolbar button { background:#2a2a2a; color:#f0f0f0; border:1px solid #444; border-radius:6px; padding:8px 12px; cursor:pointer; font-size:0.85rem; }
@@ -169,9 +261,10 @@ HTML_TEMPLATE = """
     .folder-card:hover,.image-card:hover { transform:translateY(-3px); box-shadow:0 8px 25px rgba(245,166,35,.15); }
     .folder-card { border:1px dashed #444; }
     .folder-card.selected { border-color:#f5a623; box-shadow:0 0 0 2px rgba(245,166,35,.3); }
-    .folder { display:block; padding:30px; text-align:center; text-decoration:none; }
+    .folder { display:block; padding:30px; text-align:center; text-decoration:none; position:relative; min-height:180px; }
     .folder-icon { font-size:3rem; margin-bottom:10px; }
-    .folder-name { color:#f5a623; font-weight:500; }
+    .folder-preview { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+    .folder-name { color:#f5a623; font-weight:500; position:relative; z-index:1; text-shadow:0 2px 8px rgba(0,0,0,.7); background:rgba(0,0,0,.3); display:inline-block; padding:4px 8px; border-radius:6px; }
     .image-card { position:relative; border:1px solid transparent; }
     .image-card.selected { border-color:#f5a623; box-shadow:0 0 0 2px rgba(245,166,35,.3); }
     .image-card img { width:100%; height:180px; object-fit:cover; display:block; }
@@ -179,6 +272,9 @@ HTML_TEMPLATE = """
     .image-name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .delete-btn { position:absolute; top:10px; right:10px; background:rgba(220,53,69,.9); color:white; border:none; padding:8px 12px; border-radius:5px; cursor:pointer; font-size:.8rem; opacity:0; transition:opacity .2s; }
     .image-card:hover .delete-btn { opacity:1; }
+    .thumb-preview-btn { position:absolute; bottom:10px; right:10px; background:rgba(245,166,35,.95); color:#0d0d0d; border:none; padding:6px 10px; border-radius:5px; cursor:pointer; font-size:.75rem; font-weight:600; opacity:0; transition:opacity .2s; text-decoration:none; display:flex; align-items:center; gap:4px; z-index:3; }
+    .thumb-preview-btn:hover { background:#f5a623; }
+    .image-card:hover .thumb-preview-btn { opacity:1; }
     .selector { position:absolute; top:10px; left:10px; z-index:2; transform:scale(1.2); cursor:pointer; }
     .empty { text-align:center; padding:50px; color:#666; }
     .stats { color:#666; font-size:.85rem; margin-top:20px; text-align:center; }
@@ -186,6 +282,7 @@ HTML_TEMPLATE = """
 </head>
 <body>
   <header>
+    <button type="button" id="navToggleBtn" class="nav-toggle" aria-label="Open menu" aria-expanded="false">☰</button>
     <h1>🍲 Miso Gallery</h1>
     <div class="header-actions">
       {% if parent_url %}
@@ -194,10 +291,37 @@ HTML_TEMPLATE = """
       <div class="breadcrumb">{{ breadcrumb|safe }}</div>
       <a class="refresh-btn" href="/trash" title="Open trash bin">🗑️ Trash</a>
       <a class="refresh-btn" href="/recent" title="Recent uploads">📅 Recent</a>
+      <button type="button" id="installPwaBtn" class="refresh-btn" title="Install app" hidden>⬇ Install</button>
       <button type="button" id="refreshBtn" class="refresh-btn" title="Refresh current folder">↻ Refresh</button>
     </div>
   </header>
+
+  <div id="drawerOverlay" class="drawer-overlay"></div>
+  <nav id="drawer" class="drawer" aria-label="Navigation">
+    <div class="drawer-header">
+      <div class="drawer-brand">🍲 Miso Gallery</div>
+      <button type="button" id="drawerCloseBtn" class="drawer-close" aria-label="Close menu">✕</button>
+    </div>
+    <div class="drawer-path">Path: {{ current_subpath if current_subpath else '/' }}</div>
+    <div class="drawer-links">
+      <a href="/">🏠 Home</a>
+      {% for crumb in nav_crumbs %}
+        <a href="{{ crumb.url }}" class="{% if crumb.is_current %}current{% endif %}">📁 {{ crumb.name }}</a>
+      {% endfor %}
+      <div class="drawer-divider"></div>
+      <a href="/recent">📅 Recent</a>
+      <a href="/trash">🗑️ Trash</a>
+      <a href="/settings">⚙️ Settings</a>
+      <a href="/about">ℹ️ About ({{ app_version }})</a>
+      <a href="/logout">🚪 Logout</a>
+    </div>
+  </nav>
+
   <div class="container">
+    <form method="GET" action="{{ url_for('index', subpath=current_subpath) }}" style="margin-bottom:15px;">
+      <input id="categorySearch" type="text" name="q" placeholder="Search categories..." value="{{ request.args.get('q','') }}" autocomplete="off" spellcheck="false" style="padding:6px 10px; border-radius:4px; border:1px solid #444; background:#2a2a2a; color:#e0e0e0; min-width: 240px;">
+      <button type="submit" class="refresh-btn" style="margin-left:5px;">🔍 Search</button>
+    </form>
     {% if items %}
     <form id="bulkDeleteForm" method="POST" action="/bulk-delete">
       <input type="hidden" name="csrf_token" value="{{ csrf }}">
@@ -213,7 +337,11 @@ HTML_TEMPLATE = """
             <div class="folder-card" data-folder-card>
               <input class="selector" type="checkbox" name="folders" value="{{ item.rel_path }}" onchange="syncSelectionState()">
               <a href="{{ item.url }}" class="folder">
-                <div class="folder-icon">📁</div>
+                {% if item.cover_thumb_url %}
+                  <img class="folder-preview" src="{{ item.cover_thumb_url }}" alt="{{ item.name }} folder preview" loading="lazy">
+                {% else %}
+                  <div class="folder-icon">📁</div>
+                {% endif %}
                 <div class="folder-name">{{ item.name }}</div>
               </a>
             </div>
@@ -223,6 +351,7 @@ HTML_TEMPLATE = """
               <a href="{{ item.view_url }}" target="_blank"><img src="{{ item.thumb_url }}" alt="{{ item.name }}" loading="lazy"></a>
               <div class="image-info"><div class="image-name">{{ item.name }}</div><div>{{ item.size }}</div></div>
               <button type="submit" class="delete-btn" formaction="{{ item.delete_url }}" formmethod="POST" onclick="return confirm('Delete {{ item.name }}?')">🗑️</button>
+              <a href="{{ item.thumb_url }}" target="_blank" class="thumb-preview-btn" title="View thumbnail only">🖼️ Thumb</a>
             </div>
           {% endif %}
         {% endfor %}
@@ -234,12 +363,71 @@ HTML_TEMPLATE = """
     <div class="stats">{{ stats.folders }} folders • {{ stats.images }} images</div>
   </div>
   <script>
+    let deferredInstallPrompt = null;
+    const installBtn = document.getElementById('installPwaBtn');
+
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
         navigator.serviceWorker.register('/service-worker.js').catch(() => undefined);
       });
     }
+
+    window.addEventListener('beforeinstallprompt', (event) => {
+      event.preventDefault();
+      deferredInstallPrompt = event;
+      if (installBtn) installBtn.hidden = false;
+    });
+
+    installBtn?.addEventListener('click', async () => {
+      if (!deferredInstallPrompt) return;
+      deferredInstallPrompt.prompt();
+      const result = await deferredInstallPrompt.userChoice.catch(() => null);
+      deferredInstallPrompt = null;
+      if (result?.outcome === 'dismissed') {
+        installBtn.hidden = false;
+        return;
+      }
+      installBtn.hidden = true;
+    });
+
+    window.addEventListener('appinstalled', () => {
+      deferredInstallPrompt = null;
+      if (installBtn) installBtn.hidden = true;
+    });
+
+    const drawer = document.getElementById('drawer');
+    const drawerOverlay = document.getElementById('drawerOverlay');
+    const navToggleBtn = document.getElementById('navToggleBtn');
+    const drawerCloseBtn = document.getElementById('drawerCloseBtn');
+
+    function setDrawerOpen(open) {
+      drawer?.classList.toggle('open', open);
+      drawerOverlay?.classList.toggle('open', open);
+      navToggleBtn?.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+
+    navToggleBtn?.addEventListener('click', () => setDrawerOpen(true));
+    drawerCloseBtn?.addEventListener('click', () => setDrawerOpen(false));
+    drawerOverlay?.addEventListener('click', () => setDrawerOpen(false));
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') setDrawerOpen(false); });
+
     document.getElementById('refreshBtn')?.addEventListener('click', () => window.location.reload());
+
+    // Category search (Issue #51)
+    const categorySearchInput = document.getElementById('categorySearch');
+    function applyCategorySearchFilter() {
+      if (!categorySearchInput) return;
+      const query = (categorySearchInput.value || '').trim().toLowerCase();
+      const folderCards = Array.from(document.querySelectorAll('[data-folder-card]'));
+      if (!folderCards.length) return;
+      folderCards.forEach((card) => {
+        const name = (card.querySelector('.folder-name')?.textContent || '').toLowerCase();
+        card.style.display = !query || name.includes(query) ? '' : 'none';
+      });
+    }
+    categorySearchInput?.addEventListener('input', applyCategorySearchFilter);
+    applyCategorySearchFilter();
+
     function getSelectors() { return Array.from(document.querySelectorAll('input.selector[name="filenames"], input.selector[name="folders"]')); }
     function syncSelectionState() {
       const selectors = getSelectors();
@@ -263,7 +451,7 @@ HTML_TEMPLATE = """
 
 LOGIN_TEMPLATE = """
 <!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="theme-color" content="{{ theme_color }}"><link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/assets/icon-192.png"><meta name="apple-mobile-web-app-capable" content="yes"><title>Login - Miso Gallery</title>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="theme-color" content="{{ theme_color }}"><link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/assets/icon-192.png"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="Miso Gallery"><meta name="mobile-web-app-capable" content="yes"><title>Login - Miso Gallery</title>
 <style>
  body{background:#0d0d0d;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}
  .card{background:#1a1a1a;padding:32px;border-radius:10px;min-width:320px;max-width:420px;border:1px solid #2f2f2f}
@@ -311,12 +499,20 @@ LOGIN_TEMPLATE = """
   {% endif %}
 
   <p class="note">Need access? Ask your administrator.</p>
-</div></body></html>
+</div>
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/service-worker.js').catch(() => undefined);
+    });
+  }
+</script>
+</body></html>
 """
 
 TRASH_TEMPLATE = """
 <!DOCTYPE html>
-<html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><meta name=\"theme-color\" content=\"{{ theme_color }}\"><link rel=\"manifest\" href=\"/manifest.webmanifest\"><link rel=\"apple-touch-icon\" href=\"/assets/icon-192.png\"><meta name=\"apple-mobile-web-app-capable\" content=\"yes\"><title>Trash - Miso Gallery</title>
+<html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><meta name=\"theme-color\" content=\"{{ theme_color }}\"><link rel=\"manifest\" href=\"/manifest.webmanifest\"><link rel=\"apple-touch-icon\" href=\"/assets/icon-192.png\"><meta name=\"apple-mobile-web-app-capable\" content=\"yes\"><meta name=\"apple-mobile-web-app-status-bar-style\" content=\"black-translucent\"><meta name=\"apple-mobile-web-app-title\" content=\"Miso Gallery\"><meta name=\"mobile-web-app-capable\" content=\"yes\"><title>Trash - Miso Gallery</title>
 <style>
  body{background:#0d0d0d;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:0}
  .wrap{max-width:1000px;margin:0 auto;padding:24px}
@@ -352,7 +548,15 @@ TRASH_TEMPLATE = """
     {% endfor %}
     </tbody>
   </table>
-</div></body></html>
+</div>
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/service-worker.js').catch(() => undefined);
+    });
+  }
+</script>
+</body></html>
 """
 
 RECENT_TEMPLATE = """
@@ -365,6 +569,9 @@ RECENT_TEMPLATE = """
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/assets/icon-192.png">
   <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Miso Gallery">
+  <meta name="mobile-web-app-capable" content="yes">
   <title>Recent - Miso Gallery</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -377,10 +584,14 @@ RECENT_TEMPLATE = """
     .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:15px; }
     .image-card { background:#1a1a1a; border-radius:10px; overflow:hidden; transition:transform .2s, box-shadow .2s; }
     .image-card:hover { transform:translateY(-3px); box-shadow:0 8px 25px rgba(245,166,35,.15); }
+    .image-card-link { display:block; }
     .image-card img { width:100%; height:180px; object-fit:cover; display:block; }
     .image-info { padding:10px; font-size:.8rem; color:#888; }
     .image-name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .image-date { color:#666; font-size:.75rem; margin-top:4px; }
+    .thumb-preview-btn { position:absolute; bottom:10px; right:10px; background:rgba(245,166,35,.95); color:#0d0d0d; border:none; padding:6px 10px; border-radius:5px; cursor:pointer; font-size:.75rem; font-weight:600; opacity:0; transition:opacity .2s; text-decoration:none; display:flex; align-items:center; gap:4px; z-index:3; }
+    .thumb-preview-btn:hover { background:#f5a623; }
+    .image-card:hover .thumb-preview-btn { opacity:1; }
     .empty { text-align:center; padding:50px; color:#666; }
   </style>
 </head>
@@ -388,6 +599,8 @@ RECENT_TEMPLATE = """
 <header>
   <h1>🍲 Recent</h1>
   <div class="header-actions">
+    <button type="button" id="refreshRecentBtn" class="refresh-btn" title="Refresh recent images">↻ Refresh</button>
+    <button type="button" id="installPwaBtn" class="refresh-btn" hidden>⬇ Install</button>
     <a href="/" class="refresh-btn">← Gallery</a>
   </div>
 </header>
@@ -396,21 +609,123 @@ RECENT_TEMPLATE = """
   {% if items %}
     <div class="grid">
     {% for item in items %}
-      <a href="{{ item.url }}" class="image-card" target="_blank">
-        <img src="{{ item.thumb }}" alt="{{ item.name }}">
-        <div class="image-info">
-          <div class="image-name">{{ item.name }}</div>
-          <div class="image-date">{{ item.added }}</div>
-        </div>
-      </a>
+      <div class="image-card" style="position:relative;">
+        <a href="{{ item.url }}" class="image-card-link" target="_blank">
+          <img src="{{ item.thumb }}" alt="{{ item.name }}">
+          <div class="image-info">
+            <div class="image-name">{{ item.name }}</div>
+            <div class="image-date">{{ item.added }}</div>
+          </div>
+        </a>
+        <a href="{{ item.thumb }}" target="_blank" class="thumb-preview-btn" title="View thumbnail only">🖼️ Thumb</a>
+      </div>
     {% endfor %}
     </div>
   {% else %}
     <div class="empty">No recent images found</div>
   {% endif %}
 </div>
+<script>
+  let deferredInstallPrompt = null;
+  const installBtn = document.getElementById('installPwaBtn');
+  const refreshBtn = document.getElementById('refreshRecentBtn');
+
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/service-worker.js').catch(() => undefined);
+    });
+  }
+
+  window.addEventListener('beforeinstallprompt', (event) => {
+    event.preventDefault();
+    deferredInstallPrompt = event;
+    if (installBtn) installBtn.hidden = false;
+  });
+
+  refreshBtn?.addEventListener('click', () => {
+    window.location.reload();
+  });
+
+  installBtn?.addEventListener('click', async () => {
+    if (!deferredInstallPrompt) return;
+    deferredInstallPrompt.prompt();
+    const result = await deferredInstallPrompt.userChoice.catch(() => null);
+    deferredInstallPrompt = null;
+    if (result?.outcome === 'dismissed') {
+      installBtn.hidden = false;
+      return;
+    }
+    installBtn.hidden = true;
+  });
+
+  window.addEventListener('appinstalled', () => {
+    deferredInstallPrompt = null;
+    if (installBtn) installBtn.hidden = true;
+  });
+</script>
 </body>
 </html>
+"""
+
+ABOUT_TEMPLATE = """
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="theme-color" content="{{ theme_color }}"><link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/assets/icon-192.png"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="Miso Gallery"><meta name="mobile-web-app-capable" content="yes"><title>About - Miso Gallery</title>
+<style>
+ body{background:#0d0d0d;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:0}
+ .wrap{max-width:900px;margin:0 auto;padding:24px}
+ a{color:#f5a623;text-decoration:none}
+ .card{background:#141414;border:1px solid #2f2f2f;border-radius:12px;padding:18px;margin-top:14px}
+ .row{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid #242424}
+ .row:last-child{border-bottom:none}
+ .k{color:#9aa1a8}
+</style></head>
+<body><div class="wrap">
+  <h2>ℹ️ About</h2>
+  <p><a href="/">← Back to Gallery</a></p>
+  <div class="card">
+    <div class="row"><div class="k">Version</div><div>{{ app_version }}</div></div>
+    <div class="row"><div class="k">Auth enabled</div><div>{{ auth_enabled }}</div></div>
+    <div class="row"><div class="k">Auth mode</div><div>{{ auth_mode }}</div></div>
+    <div class="row"><div class="k">OIDC configured</div><div>{{ oidc_configured }}</div></div>
+  </div>
+</div></body></html>
+"""
+
+SETTINGS_TEMPLATE = """
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="theme-color" content="{{ theme_color }}"><link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/assets/icon-192.png"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="Miso Gallery"><meta name="mobile-web-app-capable" content="yes"><title>Settings - Miso Gallery</title>
+<style>
+ body{background:#0d0d0d;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:0}
+ .wrap{max-width:900px;margin:0 auto;padding:24px}
+ a{color:#f5a623;text-decoration:none}
+ .card{background:#141414;border:1px solid #2f2f2f;border-radius:12px;padding:18px;margin-top:14px}
+ .row{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid #242424}
+ .row:last-child{border-bottom:none}
+ .k{color:#9aa1a8}
+ .note{color:#888;margin-top:10px;font-size:.9rem}
+ .btn{margin-top:12px;padding:10px 14px;border-radius:8px;border:1px solid #4b4b75;background:linear-gradient(135deg,#2f2f4f 0%,#243357 100%);color:#f5a623;cursor:pointer}
+ .ok{margin-top:12px;padding:10px 12px;border-radius:8px;border:1px solid #245f3d;background:#10271b;color:#9de2b4}
+</style></head>
+<body><div class="wrap">
+  <h2>⚙️ Settings</h2>
+  <p><a href="/">← Back to Gallery</a></p>
+  <div class="card">
+    <div class="row"><div class="k">Data folder</div><div>{{ data_folder }}</div></div>
+    <div class="row"><div class="k">Thumbnail cache</div><div>{{ thumb_cache }}</div></div>
+    <div class="row"><div class="k">Rate limiting</div><div>enabled</div></div>
+  </div>
+
+  <form method="POST" action="/maintenance/thumbnails/regenerate">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <button class="btn" type="submit">🧰 Run thumbnail integrity check</button>
+  </form>
+
+  {% if maintenance_result %}
+    <div class="ok">Checked: {{ maintenance_result.checked }} • Regenerated: {{ maintenance_result.regenerated }} • Failed: {{ maintenance_result.failed }}</div>
+  {% endif %}
+
+  <p class="note">This page intentionally avoids showing secrets or raw environment variables.</p>
+</div></body></html>
 """
 
 
@@ -438,7 +753,7 @@ def thumbnail_filename(rel_path: str, source_path: Path) -> str:
 def generate_thumbnail(source_path: Path, output_path: Path) -> None:
     with Image.open(source_path) as img:
         img = img.convert("RGB")
-        img.thumbnail(THUMBNAIL_SIZE)
+        img.thumbnail((THUMBNAIL_MAX_SIZE, THUMBNAIL_MAX_SIZE), Image.Resampling.LANCZOS)
         img.save(output_path, format="JPEG", quality=85, optimize=True)
 
 
@@ -451,6 +766,80 @@ def remove_thumbnail_cache_for(rel_path: str) -> None:
                 cached_file.unlink()
             except OSError:
                 pass
+
+
+def run_thumbnail_integrity_check() -> dict[str, int]:
+    """Check thumbnails and regenerate missing/invalid entries on demand."""
+
+    ensure_thumbnail_cache_dir()
+    excluded_dirs = {THUMBNAIL_CACHE_DIR.name, ".trash"}
+    stats = {"checked": 0, "regenerated": 0, "failed": 0}
+
+    for item in DATA_FOLDER.rglob("*"):
+        if not item.is_file() or item.suffix.lower() not in IMAGE_EXTENSIONS:
+            continue
+        if item.name.startswith("."):
+            continue
+
+        rel_path = item.relative_to(DATA_FOLDER)
+        if any(part in excluded_dirs or part.startswith(".") for part in rel_path.parts):
+            continue
+
+        rel_posix = rel_path.as_posix()
+        stats["checked"] += 1
+
+        cached_name = thumbnail_filename(rel_posix, item)
+        cached_path = THUMBNAIL_CACHE_DIR / cached_name
+
+        needs_regen = not cached_path.exists()
+        if not needs_regen:
+            try:
+                with Image.open(cached_path) as thumb_img:
+                    thumb_img.verify()
+            except (UnidentifiedImageError, OSError):
+                needs_regen = True
+
+        if not needs_regen:
+            continue
+
+        try:
+            generate_thumbnail(item, cached_path)
+            stats["regenerated"] += 1
+        except (UnidentifiedImageError, OSError):
+            stats["failed"] += 1
+
+    return stats
+
+
+def folder_cover_rel_path(folder_rel_path: str) -> str | None:
+    """Return a cached auto-cover image rel path for a folder, if available."""
+
+    if not AUTO_FOLDER_COVERS_ENABLED:
+        return None
+
+    now = time.time()
+    cached = _FOLDER_COVER_CACHE.get(folder_rel_path)
+    if cached and now - cached[0] < FOLDER_COVER_CACHE_TTL:
+        return cached[1]
+
+    folder_path = DATA_FOLDER / sanitize_rel_path(folder_rel_path) if folder_rel_path else DATA_FOLDER
+    if not folder_path.exists() or not folder_path.is_dir():
+        _FOLDER_COVER_CACHE[folder_rel_path] = (now, None)
+        return None
+
+    cover_rel: str | None = None
+    candidates = sorted(folder_path.rglob("*"), key=lambda p: p.as_posix().lower())
+    for candidate in candidates:
+        if not candidate.is_file() or candidate.suffix.lower() not in IMAGE_EXTENSIONS:
+            continue
+        rel_candidate = candidate.relative_to(DATA_FOLDER)
+        if any(part in {".thumb_cache", ".trash"} or part.startswith(".") for part in rel_candidate.parts):
+            continue
+        cover_rel = rel_candidate.as_posix()
+        break
+
+    _FOLDER_COVER_CACHE[folder_rel_path] = (now, cover_rel)
+    return cover_rel
 
 
 def format_size(size: int) -> str:
@@ -471,6 +860,7 @@ def check_auth():
     if (
         request.path.startswith("/view/")
         or request.path.startswith("/thumb/")
+        or request.path.startswith("/images/")
         or request.path.startswith("/assets/")
         or request.path in {"/favicon.ico", "/manifest.webmanifest", "/service-worker.js"}
     ):
@@ -554,6 +944,8 @@ def images(filename: str):
 @app.route("/<path:subpath>")
 @require_auth
 def index(subpath: str = ""):
+    # Search query for filtering items
+    search_query = request.args.get('q', '').strip().lower()
     safe_subpath = sanitize_rel_path(subpath) if subpath else ""
     folder_path = DATA_FOLDER / safe_subpath
     if not folder_path.exists() or not folder_path.is_dir():
@@ -571,7 +963,16 @@ def index(subpath: str = ""):
 
         if item.is_dir():
             stats["folders"] += 1
-            items.append({"name": item.name, "url": url_for("index", subpath=rel_path), "is_dir": True})
+            cover_rel_path = folder_cover_rel_path(rel_path)
+            items.append(
+                {
+                    "name": item.name,
+                    "rel_path": rel_path,
+                    "url": url_for("index", subpath=rel_path),
+                    "cover_thumb_url": url_for("thumb", filename=cover_rel_path) if cover_rel_path else None,
+                    "is_dir": True,
+                }
+            )
         elif item.suffix.lower() in IMAGE_EXTENSIONS:
             stats["images"] += 1
             items.append(
@@ -586,7 +987,14 @@ def index(subpath: str = ""):
                 }
             )
 
+    # Apply category search filter (root only).
+    # Issue #51 expects folder/category name substring matching.
+    if search_query and not safe_subpath:
+        items = [i for i in items if i.get("is_dir") and search_query in i["name"].lower()]
+        stats["folders"] = sum(1 for i in items if i.get("is_dir"))
+        stats["images"] = sum(1 for i in items if not i.get("is_dir"))
     parent_url = None
+    nav_crumbs: list[dict[str, object]] = []
     if safe_subpath:
         parts = safe_subpath.split("/")
         crumbs = ['<a href="/">Home</a>']
@@ -595,6 +1003,12 @@ def index(subpath: str = ""):
             crumbs.append(f'<a href="/{path}">{part}</a>')
         crumbs.append(parts[-1])
         breadcrumb = " / ".join(crumbs)
+
+        accum: list[str] = []
+        for part in parts:
+            accum.append(part)
+            path = "/".join(accum)
+            nav_crumbs.append({"name": part, "url": url_for("index", subpath=path), "is_current": path == safe_subpath})
 
         parent_subpath = "/".join(parts[:-1])
         parent_url = url_for("index", subpath=parent_subpath) if parent_subpath else url_for("index")
@@ -608,6 +1022,8 @@ def index(subpath: str = ""):
         parent_url=parent_url,
         stats=stats,
         current_subpath=safe_subpath,
+        nav_crumbs=nav_crumbs,
+        app_version=APP_VERSION,
         csrf=csrf_token(),
         theme_color=PWA_THEME_COLOR,
     )
@@ -645,15 +1061,25 @@ def view(filename: str):
 @rate_limit(max_requests=30, window=60)
 def delete(filename: str):
     if not sanitize_path(filename):
+        log_security_event("delete", "denied", reason="invalid_filename")
         return {"error": "Invalid filename"}, 400
     if not validate_csrf(request.form.get("csrf_token")):
+        log_security_event("delete", "denied", reason="invalid_csrf")
         return {"error": "Invalid CSRF token"}, 403
 
     rel_path = sanitize_rel_path(filename)
     file_path = source_file_path(rel_path)
+
+    outcome = "not_found"
     if file_path.exists() and file_path.is_file():
-        if move_to_trash(file_path, DATA_FOLDER):
+        moved = move_to_trash(file_path, DATA_FOLDER)
+        if moved:
             remove_thumbnail_cache_for(rel_path)
+            outcome = "success"
+        else:
+            outcome = "error"
+
+    log_security_event("delete", outcome, target=rel_path)
 
     folder = os.path.dirname(rel_path)
     return redirect(url_for("index", subpath=folder if folder else ""))
@@ -664,11 +1090,15 @@ def delete(filename: str):
 @rate_limit(max_requests=20, window=60)
 def bulk_delete():
     if not validate_csrf(request.form.get("csrf_token")):
+        log_security_event("bulk_delete", "denied", reason="invalid_csrf")
         return {"error": "Invalid CSRF token"}, 403
 
     current_subpath = sanitize_rel_path(request.form.get("current_subpath", "")) if request.form.get("current_subpath") else ""
     selected_files = request.form.getlist("filenames")
     selected_folders = request.form.getlist("folders")
+
+    moved_files = 0
+    moved_folders = 0
 
     # Delete selected files
     for rel_path in selected_files:
@@ -678,6 +1108,7 @@ def bulk_delete():
         file_path = source_file_path(safe_rel_path)
         if file_path.exists() and file_path.is_file():
             if move_to_trash(file_path, DATA_FOLDER):
+                moved_files += 1
                 remove_thumbnail_cache_for(safe_rel_path)
 
     # Delete selected folders
@@ -688,7 +1119,19 @@ def bulk_delete():
         folder_path = DATA_FOLDER / safe_rel_path
         if folder_path.exists() and folder_path.is_dir():
             if move_to_trash(folder_path, DATA_FOLDER):
+                moved_folders += 1
                 remove_thumbnail_cache_for(safe_rel_path)
+
+    outcome = "success" if (moved_files or moved_folders) else "noop"
+    log_security_event(
+        "bulk_delete",
+        outcome,
+        selected_files=len(selected_files),
+        selected_folders=len(selected_folders),
+        moved_files=moved_files,
+        moved_folders=moved_folders,
+        current_subpath=current_subpath,
+    )
 
     return redirect(url_for("index", subpath=current_subpath))
 
@@ -702,13 +1145,20 @@ def recent_view():
 
     max_items = 50
     images = []
+    excluded_dirs = {THUMBNAIL_CACHE_DIR.name, ".trash"}
 
     def is_image(path: Path) -> bool:
         return path.suffix.lower() in IMAGE_EXTENSIONS
 
+    def is_excluded_from_recent(path: Path) -> bool:
+        rel_parts = path.relative_to(DATA_FOLDER).parts
+        return any(part in excluded_dirs for part in rel_parts)
+
     try:
         for item in DATA_FOLDER.rglob("*"):
             if not item.is_file() or not is_image(item):
+                continue
+            if is_excluded_from_recent(item):
                 continue
             if item.name.startswith("."):
                 continue
@@ -752,8 +1202,11 @@ def trash_view():
 @rate_limit(max_requests=20, window=60)
 def trash_restore(item_name: str):
     if not validate_csrf(request.form.get("csrf_token")):
+        log_security_event("trash_restore", "denied", reason="invalid_csrf")
         return {"error": "Invalid CSRF token"}, 403
-    restore_from_trash(item_name, DATA_FOLDER)
+
+    restored = restore_from_trash(item_name, DATA_FOLDER)
+    log_security_event("trash_restore", "success" if restored else "not_found", item=item_name)
     return redirect(url_for("trash_view"))
 
 
@@ -762,8 +1215,11 @@ def trash_restore(item_name: str):
 @rate_limit(max_requests=5, window=60)
 def trash_empty():
     if not validate_csrf(request.form.get("csrf_token")):
+        log_security_event("trash_empty", "denied", reason="invalid_csrf")
         return {"error": "Invalid CSRF token"}, 403
-    empty_trash(DATA_FOLDER)
+
+    deleted = empty_trash(DATA_FOLDER)
+    log_security_event("trash_empty", "success", deleted=deleted)
     return redirect(url_for("trash_view"))
 
 
@@ -808,7 +1264,7 @@ def login():
 
 
 @app.route("/auth", methods=["POST"])
-@rate_limit(max_requests=8, window=60)
+@rate_limit(max_requests=5, window=300)
 def auth():
     if not validate_csrf(request.form.get("csrf_token")):
         return {"error": "Invalid CSRF token"}, 403
@@ -820,16 +1276,159 @@ def auth():
 
     password = request.form.get("password", "")
     if verify_local_password(password):
+        session.permanent = True
         session["authenticated"] = True
+        session["auth_method"] = "local"
+        log_security_event("login", "success", auth_method="local")
         return redirect(next_url)
 
+    log_security_event("login", "failure", auth_method="local", reason="invalid_password")
     return redirect(url_for("login", error="invalid", next=next_url))
 
 
 @app.route("/logout")
 def logout():
+    log_security_event("logout", "success")
     session.clear()
     return redirect(url_for("login", next="/"))
+
+
+@app.route("/maintenance/thumbnails/regenerate", methods=["POST"])
+@require_auth
+@rate_limit(max_requests=5, window=60)
+def maintenance_thumbnails_regenerate():
+    if not validate_csrf(request.form.get("csrf_token")):
+        log_security_event("thumb_maintenance", "denied", reason="invalid_csrf")
+        return {"error": "Invalid CSRF token"}, 403
+
+    stats = run_thumbnail_integrity_check()
+    log_security_event(
+        "thumb_maintenance",
+        "success",
+        checked=stats["checked"],
+        regenerated=stats["regenerated"],
+        failed=stats["failed"],
+    )
+
+    return redirect(
+        url_for(
+            "settings_view",
+            thumb_checked=stats["checked"],
+            thumb_regenerated=stats["regenerated"],
+            thumb_failed=stats["failed"],
+        )
+    )
+
+
+@app.route("/api/webhook/run", methods=["POST"])
+@require_auth
+@rate_limit(max_requests=20, window=60)
+def webhook_run_task():
+    if not _webhook_enabled():
+        return {"error": "Webhook tasks are disabled"}, 404
+
+    payload = request.get_json(silent=True) or {}
+    task = str(payload.get("task", "")).strip()
+    params = payload.get("params") or {}
+
+    if not task:
+        return {"error": "task is required"}, 400
+    if not isinstance(params, dict):
+        return {"error": "params must be an object"}, 400
+
+    env_key = _task_env_key(task)
+    if not env_key:
+        return {"error": "invalid task name"}, 400
+
+    template = os.environ.get(env_key, "").strip()
+    if not template:
+        return {"error": f"task '{task}' is not configured"}, 404
+
+    try:
+        command = _render_task_command(template, params)
+        argv = shlex.split(command)
+    except ValueError as exc:
+        return {"error": str(exc)}, 400
+
+    if not argv:
+        return {"error": "configured task produced an empty command"}, 500
+
+    try:
+        timeout = max(1, min(600, int(os.environ.get("WEBHOOK_TASK_TIMEOUT", "30"))))
+    except ValueError:
+        timeout = 30
+
+    try:
+        completed = subprocess.run(
+            argv,
+            cwd=str(DATA_FOLDER),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        log_security_event("webhook_task", "error", task=task, reason="timeout", timeout=timeout)
+        return {"task": task, "success": False, "error": f"task timed out after {timeout}s"}, 504
+    except OSError as exc:
+        log_security_event("webhook_task", "error", task=task, reason="spawn_failed", error=str(exc))
+        return {"task": task, "success": False, "error": f"failed to execute task: {exc}"}, 500
+
+    success = completed.returncode == 0
+    log_security_event(
+        "webhook_task",
+        "success" if success else "error",
+        task=task,
+        exit_code=completed.returncode,
+    )
+
+    return {
+        "task": task,
+        "success": success,
+        "exitCode": completed.returncode,
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+    }
+
+
+@app.route("/settings")
+@require_auth
+def settings_view():
+    maintenance_result = None
+    checked = request.args.get("thumb_checked")
+    regenerated = request.args.get("thumb_regenerated")
+    failed = request.args.get("thumb_failed")
+    if checked is not None and regenerated is not None and failed is not None:
+        try:
+            maintenance_result = {
+                "checked": int(checked),
+                "regenerated": int(regenerated),
+                "failed": int(failed),
+            }
+        except ValueError:
+            maintenance_result = None
+
+    return render_template_string(
+        SETTINGS_TEMPLATE,
+        theme_color=PWA_THEME_COLOR,
+        data_folder=str(DATA_FOLDER),
+        thumb_cache=str(THUMBNAIL_CACHE_DIR),
+        maintenance_result=maintenance_result,
+        csrf=csrf_token(),
+    )
+
+
+@app.route("/about")
+@require_auth
+def about_view():
+    return render_template_string(
+        ABOUT_TEMPLATE,
+        theme_color=PWA_THEME_COLOR,
+        app_version=APP_VERSION,
+        auth_enabled=is_auth_enabled(),
+        auth_mode=resolved_auth_mode(),
+        oidc_configured=is_oidc_configured(),
+    )
 
 
 @app.route("/auth/oidc")
@@ -873,20 +1472,31 @@ def oidc_callback():
         if not user_id:
             return "Could not identify user from OIDC response", 400
 
-        # Set session as authenticated
+        # Set session as permanent and authenticated
+        session.permanent = True
         session["authenticated"] = True
         session["user_id"] = user_id
         session["user_name"] = user_name
         session["auth_method"] = "oidc"
+
+        log_security_event("login", "success", auth_method="oidc")
 
         # Redirect to the stored next URL or index
         next_url = session.pop("oidc_next_url", None) or url_for("index")
         return redirect(next_url)
 
     except Exception as e:
-        app.logger.error(f"OIDC callback error: {e}")
+        log_security_event("login", "error", auth_method="oidc", error=type(e).__name__)
         next_url = session.pop("oidc_next_url", None) or "/"
         return redirect(url_for("login", error="oidc_failed", next=next_url))
+
+
+# Health routes
+from health import storage_health, storage_health_read, storage_health_write
+
+app.add_url_rule("/health/storage", "storage_health", storage_health, methods=["GET"])
+app.add_url_rule("/health/storage/read", "storage_health_read", storage_health_read, methods=["GET"])
+app.add_url_rule("/health/storage/write", "storage_health_write", storage_health_write, methods=["GET"])
 
 
 if __name__ == "__main__":
