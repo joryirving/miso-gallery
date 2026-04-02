@@ -256,6 +256,10 @@ HTML_TEMPLATE = """
     .toolbar button { background:#2a2a2a; color:#f0f0f0; border:1px solid #444; border-radius:6px; padding:8px 12px; cursor:pointer; font-size:0.85rem; }
     .toolbar .danger { background:#a52834; border-color:#dc3545; }
     .toolbar .danger:disabled { opacity:0.5; cursor:not-allowed; }
+    .selection-actions { display:none; align-items:center; gap:10px; padding:10px 12px; margin:-4px 0 15px; background:#171717; border:1px solid #343434; border-radius:8px; }
+    .selection-actions.active { display:flex; flex-wrap:wrap; }
+    .selection-count { color:#f5a623; font-weight:600; }
+    .selection-actions .ghost-btn { background:transparent; color:#c9c9c9; border:1px solid #4a4a4a; }
     .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:15px; }
     .folder-card,.image-card { background:#1a1a1a; border-radius:10px; overflow:hidden; transition:transform .2s, box-shadow .2s; position:relative; }
     .folder-card:hover,.image-card:hover { transform:translateY(-3px); box-shadow:0 8px 25px rgba(245,166,35,.15); }
@@ -329,6 +333,10 @@ HTML_TEMPLATE = """
       <div class="toolbar">
         <button type="button" id="selectAllBtn">Select all</button>
         <button type="button" id="deselectAllBtn">Deselect all</button>
+      </div>
+      <div id="selectionActions" class="selection-actions" aria-live="polite">
+        <span id="selectionCount" class="selection-count">0 selected</span>
+        <button type="button" id="clearSelectionBtn" class="ghost-btn">Clear selection</button>
         <button type="submit" id="bulkDeleteBtn" class="danger" disabled onclick="return confirmBulkDelete()">Delete selected (0)</button>
       </div>
       <div class="grid">
@@ -433,16 +441,23 @@ HTML_TEMPLATE = """
       const selectors = getSelectors();
       const selectedCount = selectors.filter(s => s.checked).length;
       const bulkDeleteBtn = document.getElementById('bulkDeleteBtn');
+      const selectionActions = document.getElementById('selectionActions');
+      const selectionCount = document.getElementById('selectionCount');
+      const clearSelectionBtn = document.getElementById('clearSelectionBtn');
       selectors.forEach((selector) => {
         const card = selector.closest('[data-image-card]') || selector.closest('[data-folder-card]');
         card?.classList.toggle('selected', selector.checked);
       });
       if (bulkDeleteBtn) { bulkDeleteBtn.disabled = selectedCount === 0; bulkDeleteBtn.textContent = `Delete selected (${selectedCount})`; }
+      if (selectionCount) { selectionCount.textContent = `${selectedCount} selected`; }
+      if (selectionActions) { selectionActions.classList.toggle('active', selectedCount > 0); }
+      if (clearSelectionBtn) { clearSelectionBtn.disabled = selectedCount === 0; }
     }
     function setAllSelections(checked) { getSelectors().forEach((selector) => selector.checked = checked); syncSelectionState(); }
     function confirmBulkDelete() { const c = getSelectors().filter(s => s.checked).length; return c > 0 && confirm(`Delete ${c} selected image(s)?`); }
     document.getElementById('selectAllBtn')?.addEventListener('click', () => setAllSelections(true));
     document.getElementById('deselectAllBtn')?.addEventListener('click', () => setAllSelections(false));
+    document.getElementById('clearSelectionBtn')?.addEventListener('click', () => setAllSelections(false));
     syncSelectionState();
   </script>
 </body>
