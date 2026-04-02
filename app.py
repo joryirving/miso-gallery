@@ -305,6 +305,21 @@ HTML_TEMPLATE = """
     .selector { position:absolute; top:10px; left:10px; z-index:2; transform:scale(1.2); cursor:pointer; }
     .empty { text-align:center; padding:50px; color:#666; }
     .stats { color:#666; font-size:.85rem; margin-top:20px; text-align:center; }
+    @media (max-width: 640px) {
+      .toolbar,
+      .selection-actions {
+        flex-direction:column;
+        align-items:stretch;
+      }
+      .toolbar button,
+      .selection-actions button {
+        width:100%;
+      }
+      .selection-count,
+      .selection-hint {
+        width:100%;
+      }
+    }
   </style>
 </head>
 <body>

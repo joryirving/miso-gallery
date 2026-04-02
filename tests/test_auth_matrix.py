@@ -152,3 +152,5 @@ def test_bulk_toolbar_shows_download_unavailable_fallback(monkeypatch, tmp_path)
     body = resp.get_data(as_text=True)
     assert "Download selected (unavailable)" in body
     assert "Bulk download is not available yet. Use each item’s direct view/thumb actions for now." in body
+    assert "@media (max-width: 640px)" in body
+    assert ".selection-actions button" in body
