@@ -118,3 +118,28 @@ def test_root_gallery_renders_inline_details_panel(monkeypatch, tmp_path):
     assert "content-visibility:auto" in html
     assert "contain-intrinsic-size:260px 320px" in html
     assert "fetchpriority=\"low\"" in html
+
+
+def test_bulk_delete_redirects_with_feedback(monkeypatch, tmp_path):
+    client = build_client(monkeypatch, tmp_path, auth_type="none")
+
+    with client.session_transaction() as sess:
+        sess["csrf_token"] = "bulk-csrf"
+
+    resp = client.post(
+        "/bulk-delete",
+        data={
+            "csrf_token": "bulk-csrf",
+            "current_subpath": "",
+            "filenames": ["sample.png"],
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    assert "bulk_state=success" in resp.headers["Location"]
+    assert "bulk_deleted=1" in resp.headers["Location"]
+
+    follow = client.get(resp.headers["Location"])
+    body = follow.get_data(as_text=True)
+    assert follow.status_code == 200
+    assert "Moved 1 image to trash. Selection cleared." in body

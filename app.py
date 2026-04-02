@@ -257,6 +257,9 @@ HTML_TEMPLATE = """
     .filter-chip { display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border-radius:999px; background:rgba(245,166,35,.12); border:1px solid rgba(245,166,35,.35); color:#f6c36d; font-size:.92rem; }
     .clear-filter-link { color:#f5a623; text-decoration:none; font-size:.92rem; }
     .clear-filter-link:hover { text-decoration:underline; }
+    .bulk-feedback { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:-4px 0 15px; padding:10px 12px; border-radius:8px; border:1px solid #2f3a2f; background:#152015; color:#cfe8cf; }
+    .bulk-feedback.info { border-color:#3b3b3b; background:#171717; color:#d6d6d6; }
+    .bulk-feedback strong { color:#f5a623; }
     .toolbar button { background:#2a2a2a; color:#f0f0f0; border:1px solid #444; border-radius:6px; padding:8px 12px; cursor:pointer; font-size:0.85rem; }
     .toolbar .danger { background:#a52834; border-color:#dc3545; }
     .toolbar .danger:disabled { opacity:0.5; cursor:not-allowed; }
@@ -352,6 +355,12 @@ HTML_TEMPLATE = """
       <span>Active filter:</span>
       <span class="filter-chip">Category name contains “{{ search_query }}”</span>
       <a href="{{ url_for('index', subpath=current_subpath) }}" class="clear-filter-link">Clear filter</a>
+    </div>
+    {% endif %}
+    {% if bulk_feedback %}
+    <div class="bulk-feedback {{ bulk_feedback.kind }}" role="status" aria-live="polite">
+      <strong>Bulk action:</strong>
+      <span>{{ bulk_feedback.message }}</span>
     </div>
     {% endif %}
     {% if items %}
@@ -1060,6 +1069,9 @@ def index(subpath: str = ""):
 
     # Search query for filtering items
     search_query = request.args.get('q', '').strip().lower()
+    bulk_state = request.args.get('bulk_state', '').strip().lower()
+    bulk_deleted = request.args.get('bulk_deleted', '0').strip()
+    bulk_folders = request.args.get('bulk_folders', '0').strip()
     safe_subpath = sanitize_rel_path(subpath) if subpath else ""
     folder_path = DATA_FOLDER / safe_subpath
     if not folder_path.exists() or not folder_path.is_dir():
@@ -1131,6 +1143,26 @@ def index(subpath: str = ""):
     else:
         breadcrumb = "All Images"
 
+    bulk_feedback = None
+    if bulk_state == "success":
+        moved_files = int(bulk_deleted) if bulk_deleted.isdigit() else 0
+        moved_folders = int(bulk_folders) if bulk_folders.isdigit() else 0
+        parts = []
+        if moved_files:
+            parts.append(f"{moved_files} image{'s' if moved_files != 1 else ''}")
+        if moved_folders:
+            parts.append(f"{moved_folders} folder{'s' if moved_folders != 1 else ''}")
+        summary = " and ".join(parts) if parts else "selected items"
+        bulk_feedback = {
+            "kind": "success",
+            "message": f"Moved {summary} to trash. Selection cleared.",
+        }
+    elif bulk_state == "noop":
+        bulk_feedback = {
+            "kind": "info",
+            "message": "No selected items were moved to trash.",
+        }
+
     return render_template_string(
         HTML_TEMPLATE,
         items=items,
@@ -1141,6 +1173,7 @@ def index(subpath: str = ""):
         nav_crumbs=nav_crumbs,
         search_query=search_query,
         category_filter_active=bool(search_query and not safe_subpath),
+        bulk_feedback=bulk_feedback,
         app_version=APP_VERSION,
         csrf=csrf_token(),
         theme_color=PWA_THEME_COLOR,
@@ -1251,6 +1284,17 @@ def bulk_delete():
         current_subpath=current_subpath,
     )
 
+    redirect_kwargs = {"subpath": current_subpath}
+    if moved_files or moved_folders:
+        redirect_kwargs.update(
+            bulk_state="success",
+            bulk_deleted=str(moved_files),
+            bulk_folders=str(moved_folders),
+        )
+    else:
+        redirect_kwargs.update(bulk_state="noop")
+
+    return redirect(url_for("index", **redirect_kwargs))
 
 
 @app.route("/tag", methods=["POST"])
