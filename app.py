@@ -395,6 +395,7 @@ HTML_TEMPLATE = """
                   <div class="image-details-row"><span class="image-details-label">Filename</span><span class="image-details-value">{{ item.name }}</span></div>
                   <div class="image-details-row"><span class="image-details-label">Path</span><span class="image-details-value">{{ item.rel_path }}</span></div>
                   <div class="image-details-row"><span class="image-details-label">Size</span><span class="image-details-value">{{ item.size }}</span></div>
+                  {% if item.dimensions %}<div class="image-details-row"><span class="image-details-label">Dimensions</span><span class="image-details-value">{{ item.dimensions }}</span></div>{% endif %}
                   <div class="image-details-row"><span class="image-details-label">Modified</span><span class="image-details-value">{{ item.modified }}</span></div>
                 </div>
               </details>
@@ -694,6 +695,7 @@ RECENT_TEMPLATE = """
             <div class="image-details-row"><span class="image-details-label">Filename</span><span class="image-details-value">{{ item.name }}</span></div>
             <div class="image-details-row"><span class="image-details-label">Path</span><span class="image-details-value">{{ item.rel_path }}</span></div>
             <div class="image-details-row"><span class="image-details-label">Size</span><span class="image-details-value">{{ item.size }}</span></div>
+            {% if item.dimensions %}<div class="image-details-row"><span class="image-details-label">Dimensions</span><span class="image-details-value">{{ item.dimensions }}</span></div>{% endif %}
             <div class="image-details-row"><span class="image-details-label">Added</span><span class="image-details-value">{{ item.added }}</span></div>
           </div>
         </details>
@@ -941,6 +943,15 @@ def format_size(size: int) -> str:
             return f"{value:.1f} {unit}"
         value /= 1024
     return f"{value:.1f} TB"
+
+
+def get_image_dimensions(path: Path) -> str | None:
+    try:
+        with Image.open(path) as img:
+            width, height = img.size
+        return f"{width} × {height}"
+    except Exception:
+        return None
 
 
 @app.before_request
@@ -1279,6 +1290,7 @@ def recent_view():
                 "thumb": url_for("thumb", filename=rel_path),
                 "added": date_str,
                 "size": format_size(item.stat().st_size),
+                "dimensions": get_image_dimensions(item),
                 "mtime": mtime,
                 "folder_url": folder_url,
             })

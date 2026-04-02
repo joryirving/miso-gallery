@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -19,7 +20,7 @@ def _extract_csrf(html: str) -> str:
 def build_client(monkeypatch, tmp_path, *, auth_type: str, admin_password: str = "", oidc_enabled: bool = False):
     data_dir = tmp_path / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
-    (data_dir / "sample.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    Image.new("RGB", (32, 16), color="blue").save(data_dir / "sample.png")
 
     monkeypatch.setenv("DATA_FOLDER", str(data_dir))
     monkeypatch.setenv("AUTH_TYPE", auth_type)
