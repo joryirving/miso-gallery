@@ -257,13 +257,19 @@ HTML_TEMPLATE = """
     .filter-chip { display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border-radius:999px; background:rgba(245,166,35,.12); border:1px solid rgba(245,166,35,.35); color:#f6c36d; font-size:.92rem; }
     .clear-filter-link { color:#f5a623; text-decoration:none; font-size:.92rem; }
     .clear-filter-link:hover { text-decoration:underline; }
+    .bulk-feedback { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:-4px 0 15px; padding:10px 12px; border-radius:8px; border:1px solid #2f3a2f; background:#152015; color:#cfe8cf; }
+    .bulk-feedback.info { border-color:#3b3b3b; background:#171717; color:#d6d6d6; }
+    .bulk-feedback strong { color:#f5a623; }
     .toolbar button { background:#2a2a2a; color:#f0f0f0; border:1px solid #444; border-radius:6px; padding:8px 12px; cursor:pointer; font-size:0.85rem; }
     .toolbar .danger { background:#a52834; border-color:#dc3545; }
+    .toolbar button:disabled { opacity:0.5; cursor:not-allowed; }
     .toolbar .danger:disabled { opacity:0.5; cursor:not-allowed; }
     .selection-actions { display:none; align-items:center; gap:10px; padding:10px 12px; margin:-4px 0 15px; background:#171717; border:1px solid #343434; border-radius:8px; }
     .selection-actions.active { display:flex; flex-wrap:wrap; }
     .selection-count { color:#f5a623; font-weight:600; }
     .selection-actions .ghost-btn { background:transparent; color:#c9c9c9; border:1px solid #4a4a4a; }
+    .selection-hint { flex-basis:100%; color:#9a9a9a; font-size:.8rem; }
+    .selection-hint code { color:#f6c36d; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
     .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:15px; }
     .folder-card,.image-card { background:#1a1a1a; border-radius:10px; overflow:hidden; transition:transform .2s, box-shadow .2s; position:relative; content-visibility:auto; contain-intrinsic-size:260px 320px; }
     .folder-card:hover,.image-card:hover { transform:translateY(-3px); box-shadow:0 8px 25px rgba(245,166,35,.15); }
@@ -300,6 +306,21 @@ HTML_TEMPLATE = """
     .selector { position:absolute; top:10px; left:10px; z-index:2; transform:scale(1.2); cursor:pointer; }
     .empty { text-align:center; padding:50px; color:#666; }
     .stats { color:#666; font-size:.85rem; margin-top:20px; text-align:center; }
+    @media (max-width: 640px) {
+      .toolbar,
+      .selection-actions {
+        flex-direction:column;
+        align-items:stretch;
+      }
+      .toolbar button,
+      .selection-actions button {
+        width:100%;
+      }
+      .selection-count,
+      .selection-hint {
+        width:100%;
+      }
+    }
   </style>
 </head>
 <body>
@@ -354,6 +375,12 @@ HTML_TEMPLATE = """
       <a href="{{ url_for('index', subpath=current_subpath) }}" class="clear-filter-link">Clear filter</a>
     </div>
     {% endif %}
+    {% if bulk_feedback %}
+    <div class="bulk-feedback {{ bulk_feedback.kind }}" role="status" aria-live="polite">
+      <strong>Bulk action:</strong>
+      <span>{{ bulk_feedback.message }}</span>
+    </div>
+    {% endif %}
     {% if items %}
     <form id="bulkDeleteForm" method="POST" action="/bulk-delete">
       <input type="hidden" name="csrf_token" value="{{ csrf }}">
@@ -365,7 +392,9 @@ HTML_TEMPLATE = """
       <div id="selectionActions" class="selection-actions" aria-live="polite">
         <span id="selectionCount" class="selection-count">0 selected</span>
         <button type="button" id="clearSelectionBtn" class="ghost-btn">Clear selection</button>
+        <button type="button" id="bulkDownloadBtn" class="ghost-btn" disabled title="Bulk download is not available yet. Open items individually to download.">Download selected (unavailable)</button>
         <button type="submit" id="bulkDeleteBtn" class="danger" disabled onclick="return confirmBulkDelete()">Delete selected (0)</button>
+        <div class="selection-hint">Bulk download is not available yet. Use each item’s direct view/thumb actions for now.</div>
       </div>
       <div class="grid">
         {% for item in items %}
@@ -484,10 +513,13 @@ HTML_TEMPLATE = """
     function syncSelectionState() {
       const selectors = getSelectors();
       const selectedCount = selectors.filter(s => s.checked).length;
+      const totalCount = selectors.length;
       const bulkDeleteBtn = document.getElementById('bulkDeleteBtn');
       const selectionActions = document.getElementById('selectionActions');
       const selectionCount = document.getElementById('selectionCount');
       const clearSelectionBtn = document.getElementById('clearSelectionBtn');
+      const selectAllBtn = document.getElementById('selectAllBtn');
+      const deselectAllBtn = document.getElementById('deselectAllBtn');
       selectors.forEach((selector) => {
         const card = selector.closest('[data-image-card]') || selector.closest('[data-folder-card]');
         card?.classList.toggle('selected', selector.checked);
@@ -496,6 +528,8 @@ HTML_TEMPLATE = """
       if (selectionCount) { selectionCount.textContent = `${selectedCount} selected`; }
       if (selectionActions) { selectionActions.classList.toggle('active', selectedCount > 0); }
       if (clearSelectionBtn) { clearSelectionBtn.disabled = selectedCount === 0; }
+      if (selectAllBtn) { selectAllBtn.disabled = totalCount === 0 || selectedCount === totalCount; }
+      if (deselectAllBtn) { deselectAllBtn.disabled = selectedCount === 0; }
     }
     function setAllSelections(checked) { getSelectors().forEach((selector) => selector.checked = checked); syncSelectionState(); }
     function confirmBulkDelete() { const c = getSelectors().filter(s => s.checked).length; return c > 0 && confirm(`Delete ${c} selected image(s)?`); }
@@ -1060,6 +1094,9 @@ def index(subpath: str = ""):
 
     # Search query for filtering items
     search_query = request.args.get('q', '').strip().lower()
+    bulk_state = request.args.get('bulk_state', '').strip().lower()
+    bulk_deleted = request.args.get('bulk_deleted', '0').strip()
+    bulk_folders = request.args.get('bulk_folders', '0').strip()
     safe_subpath = sanitize_rel_path(subpath) if subpath else ""
     folder_path = DATA_FOLDER / safe_subpath
     if not folder_path.exists() or not folder_path.is_dir():
@@ -1131,6 +1168,26 @@ def index(subpath: str = ""):
     else:
         breadcrumb = "All Images"
 
+    bulk_feedback = None
+    if bulk_state == "success":
+        moved_files = int(bulk_deleted) if bulk_deleted.isdigit() else 0
+        moved_folders = int(bulk_folders) if bulk_folders.isdigit() else 0
+        parts = []
+        if moved_files:
+            parts.append(f"{moved_files} image{'s' if moved_files != 1 else ''}")
+        if moved_folders:
+            parts.append(f"{moved_folders} folder{'s' if moved_folders != 1 else ''}")
+        summary = " and ".join(parts) if parts else "selected items"
+        bulk_feedback = {
+            "kind": "success",
+            "message": f"Moved {summary} to trash. Selection cleared.",
+        }
+    elif bulk_state == "noop":
+        bulk_feedback = {
+            "kind": "info",
+            "message": "No selected items were moved to trash.",
+        }
+
     return render_template_string(
         HTML_TEMPLATE,
         items=items,
@@ -1141,6 +1198,7 @@ def index(subpath: str = ""):
         nav_crumbs=nav_crumbs,
         search_query=search_query,
         category_filter_active=bool(search_query and not safe_subpath),
+        bulk_feedback=bulk_feedback,
         app_version=APP_VERSION,
         csrf=csrf_token(),
         theme_color=PWA_THEME_COLOR,
@@ -1251,6 +1309,17 @@ def bulk_delete():
         current_subpath=current_subpath,
     )
 
+    redirect_kwargs = {"subpath": current_subpath}
+    if moved_files or moved_folders:
+        redirect_kwargs.update(
+            bulk_state="success",
+            bulk_deleted=str(moved_files),
+            bulk_folders=str(moved_folders),
+        )
+    else:
+        redirect_kwargs.update(bulk_state="noop")
+
+    return redirect(url_for("index", **redirect_kwargs))
 
 
 @app.route("/tag", methods=["POST"])
