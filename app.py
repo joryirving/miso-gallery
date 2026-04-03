@@ -265,7 +265,7 @@ HTML_TEMPLATE = """
     .selection-count { color:#f5a623; font-weight:600; }
     .selection-actions .ghost-btn { background:transparent; color:#c9c9c9; border:1px solid #4a4a4a; }
     .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:15px; }
-    .folder-card,.image-card { background:#1a1a1a; border-radius:10px; overflow:hidden; transition:transform .2s, box-shadow .2s; position:relative; }
+    .folder-card,.image-card { background:#1a1a1a; border-radius:10px; overflow:hidden; transition:transform .2s, box-shadow .2s; position:relative; content-visibility:auto; contain-intrinsic-size:260px 320px; }
     .folder-card:hover,.image-card:hover { transform:translateY(-3px); box-shadow:0 8px 25px rgba(245,166,35,.15); }
     .folder-card { border:1px dashed #444; }
     .folder-card.selected { border-color:#f5a623; box-shadow:0 0 0 2px rgba(245,166,35,.3); }
@@ -374,7 +374,7 @@ HTML_TEMPLATE = """
               <input class="selector" type="checkbox" name="folders" value="{{ item.rel_path }}" onchange="syncSelectionState()">
               <a href="{{ item.url }}" class="folder">
                 {% if item.cover_thumb_url %}
-                  <img class="folder-preview" src="{{ item.cover_thumb_url }}" alt="{{ item.name }} folder preview" loading="lazy" decoding="async">
+                  <img class="folder-preview" src="{{ item.cover_thumb_url }}" alt="{{ item.name }} folder preview" loading="lazy" decoding="async" fetchpriority="low">
                 {% else %}
                   <div class="folder-icon">📁</div>
                 {% endif %}
@@ -384,7 +384,7 @@ HTML_TEMPLATE = """
           {% else %}
             <div class="image-card" data-image-card>
               <input class="selector" type="checkbox" name="filenames" value="{{ item.rel_path }}" onchange="syncSelectionState()">
-              <a href="{{ item.view_url }}" target="_blank"><img src="{{ item.thumb_url }}" alt="{{ item.name }}" loading="lazy" decoding="async"></a>
+              <a href="{{ item.view_url }}" target="_blank"><img src="{{ item.thumb_url }}" alt="{{ item.name }}" loading="lazy" decoding="async" fetchpriority="low"></a>
               <div class="image-info">
                 <div class="image-name">{{ item.name }}</div>
                 <div class="image-meta-row">
@@ -657,7 +657,7 @@ RECENT_TEMPLATE = """
     .refresh-btn { background:linear-gradient(135deg,#2f2f4f 0%,#243357 100%); color:#f5a623; border:1px solid #4b4b75; border-radius:8px; padding:8px 12px; font-size:0.9rem; cursor:pointer; text-decoration:none; }
     .container { padding:20px; }
     .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:15px; }
-    .image-card { background:#1a1a1a; border-radius:10px; overflow:hidden; transition:transform .2s, box-shadow .2s; }
+    .image-card { background:#1a1a1a; border-radius:10px; overflow:hidden; transition:transform .2s, box-shadow .2s; content-visibility:auto; contain-intrinsic-size:260px 320px; }
     .image-card:hover { transform:translateY(-3px); box-shadow:0 8px 25px rgba(245,166,35,.15); }
     .image-card-link { display:block; }
     .image-card img { width:100%; height:180px; object-fit:cover; display:block; }
@@ -699,7 +699,7 @@ RECENT_TEMPLATE = """
     {% for item in items %}
       <div class="image-card" style="position:relative;">
         <a href="{{ item.url }}" class="image-card-link" target="_blank">
-          <img src="{{ item.thumb }}" alt="{{ item.name }}" loading="lazy" decoding="async">
+          <img src="{{ item.thumb }}" alt="{{ item.name }}" loading="lazy" decoding="async" fetchpriority="low">
           <div class="image-info">
             <div class="image-name">{{ item.name }}</div>
             <div class="image-meta-row">
