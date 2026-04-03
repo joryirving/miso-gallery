@@ -402,6 +402,7 @@ HTML_TEMPLATE = """
                 <div class="image-details-body">
                   <div class="image-details-row"><span class="image-details-label">Filename</span><span class="image-details-value">{{ item.name }}</span></div>
                   <div class="image-details-row"><span class="image-details-label">Path</span><span class="image-details-value">{{ item.rel_path }}</span></div>
+                  <div class="image-details-row"><span class="image-details-label">Folder</span><span class="image-details-value">{{ item.folder_label }}</span></div>
                   <div class="image-details-row"><span class="image-details-label">Size</span><span class="image-details-value">{{ item.size }}</span></div>
                   {% if item.media_type %}<div class="image-details-row"><span class="image-details-label">Type</span><span class="image-details-value">{{ item.media_type }}</span></div>{% endif %}
                   {% if item.dimensions %}<div class="image-details-row"><span class="image-details-label">Dimensions</span><span class="image-details-value">{{ item.dimensions }}</span></div>{% endif %}
@@ -725,6 +726,7 @@ RECENT_TEMPLATE = """
           <div class="image-details-body">
             <div class="image-details-row"><span class="image-details-label">Filename</span><span class="image-details-value">{{ item.name }}</span></div>
             <div class="image-details-row"><span class="image-details-label">Path</span><span class="image-details-value">{{ item.rel_path }}</span></div>
+            <div class="image-details-row"><span class="image-details-label">Folder</span><span class="image-details-value">{{ item.folder_label }}</span></div>
             <div class="image-details-row"><span class="image-details-label">Size</span><span class="image-details-value">{{ item.size }}</span></div>
             {% if item.media_type %}<div class="image-details-row"><span class="image-details-label">Type</span><span class="image-details-value">{{ item.media_type }}</span></div>{% endif %}
             {% if item.dimensions %}<div class="image-details-row"><span class="image-details-label">Dimensions</span><span class="image-details-value">{{ item.dimensions }}</span></div>{% endif %}
@@ -1126,6 +1128,7 @@ def index(subpath: str = ""):
                     "thumb_url": url_for("thumb", filename=rel_path),
                     "view_url": url_for("view", filename=rel_path),
                     "delete_url": url_for("delete", filename=rel_path),
+                    "folder_label": safe_subpath if safe_subpath else "/",
                     "size": format_size(item_stat.st_size),
                     "media_type": get_media_type(item),
                     "dimensions": get_image_dimensions(item),
@@ -1353,6 +1356,7 @@ def recent_view():
                 "rel_path": rel_path,
                 "url": url_for("view", filename=rel_path),
                 "thumb": url_for("thumb", filename=rel_path),
+                "folder_label": folder_path if folder_path else "/",
                 "added": date_str,
                 "modified": date_str,
                 "size": format_size(item.stat().st_size),
