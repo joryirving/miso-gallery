@@ -374,7 +374,7 @@ HTML_TEMPLATE = """
               <input class="selector" type="checkbox" name="folders" value="{{ item.rel_path }}" onchange="syncSelectionState()">
               <a href="{{ item.url }}" class="folder">
                 {% if item.cover_thumb_url %}
-                  <img class="folder-preview" src="{{ item.cover_thumb_url }}" alt="{{ item.name }} folder preview" loading="lazy" decoding="async">
+                  <img class="folder-preview" src="{{ item.cover_thumb_url }}" alt="{{ item.name }} folder preview" loading="lazy" decoding="async" fetchpriority="low">
                 {% else %}
                   <div class="folder-icon">📁</div>
                 {% endif %}
@@ -384,7 +384,7 @@ HTML_TEMPLATE = """
           {% else %}
             <div class="image-card" data-image-card>
               <input class="selector" type="checkbox" name="filenames" value="{{ item.rel_path }}" onchange="syncSelectionState()">
-              <a href="{{ item.view_url }}" target="_blank"><img src="{{ item.thumb_url }}" alt="{{ item.name }}" loading="lazy" decoding="async"></a>
+              <a href="{{ item.view_url }}" target="_blank"><img src="{{ item.thumb_url }}" alt="{{ item.name }}" loading="lazy" decoding="async" fetchpriority="low"></a>
               <div class="image-info">
                 <div class="image-name">{{ item.name }}</div>
                 <div class="image-meta-row">
@@ -699,7 +699,7 @@ RECENT_TEMPLATE = """
     {% for item in items %}
       <div class="image-card" style="position:relative;">
         <a href="{{ item.url }}" class="image-card-link" target="_blank">
-          <img src="{{ item.thumb }}" alt="{{ item.name }}" loading="lazy" decoding="async">
+          <img src="{{ item.thumb }}" alt="{{ item.name }}" loading="lazy" decoding="async" fetchpriority="low">
           <div class="image-info">
             <div class="image-name">{{ item.name }}</div>
             <div class="image-meta-row">

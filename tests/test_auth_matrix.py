@@ -117,3 +117,4 @@ def test_root_gallery_renders_inline_details_panel(monkeypatch, tmp_path):
     assert "Path</span><span class=\"image-details-value\">sample.png" in html
     assert "content-visibility:auto" in html
     assert "contain-intrinsic-size:260px 320px" in html
+    assert "fetchpriority=\"low\"" in html
