@@ -114,7 +114,8 @@ def log_security_event(event: str, outcome: str, **fields: object) -> None:
 # Configure OAuth for OIDC if enabled
 configure_oauth(app)
 THUMBNAIL_MAX_SIZE = 600
-IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+VIDEO_EXTENSIONS = (".gif", ".mp4", ".webm", ".mov")
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".webm", ".mov")
 FAVICON_URL = os.environ.get("FAVICON_URL", "").strip()
 
 PWA_THEME_COLOR = "#0d0d0d"
@@ -413,7 +414,9 @@ HTML_TEMPLATE = """
           {% else %}
             <div class="image-card" data-image-card>
               <input class="selector" type="checkbox" name="filenames" value="{{ item.rel_path }}" onchange="syncSelectionState()">
-              <a href="{{ item.view_url }}" target="_blank"><img src="{{ item.thumb_url }}" alt="{{ item.name }}" loading="lazy" decoding="async" fetchpriority="low"></a>
+              {% if item.media_type == "video" %}
+              <a href="{{ item.view_url }}" target="_blank"><video src="{{ item.thumb_url }}" controls preload="metadata" muted playsinline loading="lazy" alt="{{ item.name }}"></video>{% else %}
+              <a href="{{ item.view_url }}" target="_blank"><img src="{{ item.thumb_url }}" alt="{{ item.name }}" loading="lazy"></a>{% endif %}
               <div class="image-info">
                 <div class="image-name">{{ item.name }}</div>
                 <div class="image-meta-row">
@@ -733,7 +736,7 @@ RECENT_TEMPLATE = """
     {% for item in items %}
       <div class="image-card" style="position:relative;">
         <a href="{{ item.url }}" class="image-card-link" target="_blank">
-          <img src="{{ item.thumb }}" alt="{{ item.name }}" loading="lazy" decoding="async" fetchpriority="low">
+          {% if item.media_type == "video" %}<video src="{{ item.thumb }}" controls preload="metadata" muted playsinline loading="lazy" alt="{{ item.name }}">{% else %}<img src="{{ item.thumb }}" alt="{{ item.name }}">{% endif %}
           <div class="image-info">
             <div class="image-name">{{ item.name }}</div>
             <div class="image-meta-row">
@@ -1133,6 +1136,7 @@ def index(subpath: str = ""):
                     "rel_path": rel_path,
                     "thumb_url": url_for("thumb", filename=rel_path),
                     "view_url": url_for("view", filename=rel_path),
+                    "media_type": "video" if source_path.suffix.lower() in VIDEO_EXTENSIONS else "image",
                     "delete_url": url_for("delete", filename=rel_path),
                     "size": format_size(item_stat.st_size),
                     "modified": time.strftime("%Y-%m-%d %H:%M", time.localtime(item_stat.st_mtime)),
@@ -1212,6 +1216,10 @@ def thumb(filename: str):
     source_path = source_file_path(rel_path)
     if not source_path.exists() or source_path.suffix.lower() not in IMAGE_EXTENSIONS:
         return "Not found", 404
+
+    # Serve GIFs/videos directly for playback (issue #111)
+    if source_path.suffix.lower() in VIDEO_EXTENSIONS:
+        return send_from_directory(str(DATA_FOLDER), rel_path)
 
     ensure_thumbnail_cache_dir()
     cached_name = thumbnail_filename(rel_path, source_path)
@@ -1401,6 +1409,7 @@ def recent_view():
                 "size": format_size(size),
                 "mtime": mtime,
                 "folder_url": folder_url,
+                "media_type": "video" if item.suffix.lower() in VIDEO_EXTENSIONS else "image",
             })
         except (OSError, PermissionError):
             # Skip items that raise during iteration
