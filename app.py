@@ -114,7 +114,8 @@ def log_security_event(event: str, outcome: str, **fields: object) -> None:
 # Configure OAuth for OIDC if enabled
 configure_oauth(app)
 THUMBNAIL_MAX_SIZE = 600
-IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
+VIDEO_EXTENSIONS = (".gif", ".mp4", ".webm", ".mov")
 FAVICON_URL = os.environ.get("FAVICON_URL", "").strip()
 
 PWA_THEME_COLOR = "#0d0d0d"
@@ -413,7 +414,11 @@ HTML_TEMPLATE = """
           {% else %}
             <div class="image-card" data-image-card>
               <input class="selector" type="checkbox" name="filenames" value="{{ item.rel_path }}" onchange="syncSelectionState()">
-              <a href="{{ item.view_url }}" target="_blank"><img src="{{ item.thumb_url }}" alt="{{ item.name }}" loading="lazy" decoding="async" fetchpriority="low"></a>
+              {% if item.media_type == "video" %}
+                <video src="{{ item.thumb_url }}" controls preload="metadata" muted playsinline loading="lazy" alt="{{ item.name }}"></video>
+              {% else %}
+                <a href="{{ item.view_url }}" target="_blank"><img src="{{ item.thumb_url }}" alt="{{ item.name }}" loading="lazy" decoding="async" fetchpriority="low"></a>
+              {% endif %}
               <div class="image-info">
                 <div class="image-name">{{ item.name }}</div>
                 <div class="image-meta-row">
@@ -1124,9 +1129,10 @@ def index(subpath: str = ""):
                     "is_dir": True,
                 }
             )
-        elif item.suffix.lower() in IMAGE_EXTENSIONS:
+        elif item.suffix.lower() in IMAGE_EXTENSIONS or item.suffix.lower() in VIDEO_EXTENSIONS:
             stats["images"] += 1
             item_stat = item.stat()
+            is_video = item.suffix.lower() in VIDEO_EXTENSIONS
             items.append(
                 {
                     "name": item.name,
@@ -1137,6 +1143,7 @@ def index(subpath: str = ""):
                     "size": format_size(item_stat.st_size),
                     "modified": time.strftime("%Y-%m-%d %H:%M", time.localtime(item_stat.st_mtime)),
                     "is_dir": False,
+                    "media_type": "video" if is_video else "image",
                 }
             )
 
@@ -1210,12 +1217,15 @@ def index(subpath: str = ""):
 def thumb(filename: str):
     rel_path = sanitize_rel_path(filename)
     source_path = source_file_path(rel_path)
-    if not source_path.exists() or source_path.suffix.lower() not in IMAGE_EXTENSIONS:
+    if not source_path.exists() or (source_path.suffix.lower() not in IMAGE_EXTENSIONS and source_path.suffix.lower() not in VIDEO_EXTENSIONS):
         return "Not found", 404
 
     ensure_thumbnail_cache_dir()
     cached_name = thumbnail_filename(rel_path, source_path)
     cached_path = THUMBNAIL_CACHE_DIR / cached_name
+
+    if source_path.suffix.lower() in VIDEO_EXTENSIONS:
+        return send_from_directory(str(DATA_FOLDER), rel_path)
 
     if not cached_path.exists():
         try:
