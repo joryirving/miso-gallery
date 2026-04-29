@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import os
 import secrets
@@ -28,6 +29,7 @@ from auth import (
     is_auth_enabled,
     is_oidc_configured,
     oauth,
+    require_api_key,
     require_auth,
     resolved_auth_mode,
     verify_local_password,
@@ -987,9 +989,166 @@ def format_size(size: int) -> str:
     return f"{value:.1f} TB"
 
 
+def is_media_file(path: Path) -> bool:
+    return path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS + VIDEO_EXTENSIONS
+
+
+def is_excluded_gallery_path(path: Path) -> bool:
+    try:
+        rel_parts = path.relative_to(DATA_FOLDER).parts
+    except ValueError:
+        return True
+    return any(part in {THUMBNAIL_CACHE_DIR.name, ".trash"} or part.startswith(".") for part in rel_parts)
+
+
+def media_metadata(path: Path) -> dict[str, object]:
+    rel_path = path.relative_to(DATA_FOLDER).as_posix()
+    stat = path.stat()
+    media_type = "video" if path.suffix.lower() in VIDEO_EXTENSIONS else "image"
+    return {
+        "name": path.name,
+        "rel_path": rel_path,
+        "media_type": media_type,
+        "size": stat.st_size,
+        "size_human": format_size(stat.st_size),
+        "modified": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stat.st_mtime)),
+        "mtime": stat.st_mtime,
+        "view_url": url_for("view", filename=rel_path),
+        "thumb_url": url_for("thumb", filename=rel_path),
+    }
+
+
+def iter_gallery_media() -> list[Path]:
+    media: list[Path] = []
+    for item in DATA_FOLDER.rglob("*"):
+        try:
+            if is_media_file(item) and not is_excluded_gallery_path(item):
+                media.append(item)
+        except (OSError, PermissionError):
+            continue
+    return sorted(media, key=lambda p: p.relative_to(DATA_FOLDER).as_posix().lower())
+
+
+def iter_gallery_folders() -> list[Path]:
+    folders: list[Path] = []
+    for item in DATA_FOLDER.rglob("*"):
+        try:
+            if item.is_dir() and not is_excluded_gallery_path(item):
+                folders.append(item)
+        except (OSError, PermissionError):
+            continue
+    return sorted(folders, key=lambda p: p.relative_to(DATA_FOLDER).as_posix().lower())
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def find_duplicate_media() -> list[dict[str, object]]:
+    by_size: dict[int, list[Path]] = {}
+    for item in iter_gallery_media():
+        try:
+            by_size.setdefault(item.stat().st_size, []).append(item)
+        except OSError:
+            continue
+
+    groups: list[dict[str, object]] = []
+    for same_size in by_size.values():
+        if len(same_size) < 2:
+            continue
+        by_hash: dict[str, list[Path]] = {}
+        for item in same_size:
+            try:
+                by_hash.setdefault(file_sha256(item), []).append(item)
+            except OSError:
+                continue
+        for digest, matches in by_hash.items():
+            if len(matches) < 2:
+                continue
+            matches = sorted(matches, key=lambda p: p.relative_to(DATA_FOLDER).as_posix().lower())
+            groups.append(
+                {
+                    "hash": digest,
+                    "size": matches[0].stat().st_size,
+                    "keep": matches[0].relative_to(DATA_FOLDER).as_posix(),
+                    "duplicates": [p.relative_to(DATA_FOLDER).as_posix() for p in matches[1:]],
+                    "all": [p.relative_to(DATA_FOLDER).as_posix() for p in matches],
+                }
+            )
+    return groups
+
+
+def run_configured_task(payload: dict[str, object]) -> tuple[dict[str, object], int]:
+    if not _webhook_enabled():
+        return {"error": "Webhook tasks are disabled"}, 404
+
+    task = str(payload.get("task", "")).strip()
+    params = payload.get("params") or {}
+
+    if not task:
+        return {"error": "task is required"}, 400
+    if not isinstance(params, dict):
+        return {"error": "params must be an object"}, 400
+
+    env_key = _task_env_key(task)
+    if not env_key:
+        return {"error": "invalid task name"}, 400
+
+    template = os.environ.get(env_key, "").strip()
+    if not template:
+        return {"error": f"task '{task}' is not configured"}, 404
+
+    try:
+        command = _render_task_command(template, params)
+        argv = shlex.split(command)
+    except ValueError as exc:
+        return {"error": str(exc)}, 400
+
+    if not argv:
+        return {"error": "configured task produced an empty command"}, 500
+
+    try:
+        timeout = max(1, min(600, int(os.environ.get("WEBHOOK_TASK_TIMEOUT", "30"))))
+    except ValueError:
+        timeout = 30
+
+    try:
+        completed = subprocess.run(
+            argv,
+            cwd=str(DATA_FOLDER),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        log_security_event("webhook_task", "error", task=task, reason="timeout", timeout=timeout)
+        return {"task": task, "success": False, "error": f"task timed out after {timeout}s"}, 504
+    except OSError as exc:
+        log_security_event("webhook_task", "error", task=task, reason="spawn_failed", error=str(exc))
+        return {"task": task, "success": False, "error": f"failed to execute task: {exc}"}, 500
+
+    success = completed.returncode == 0
+    log_security_event("webhook_task", "success" if success else "error", task=task, exit_code=completed.returncode)
+    return {
+        "task": task,
+        "success": success,
+        "exitCode": completed.returncode,
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+    }, 200
+
+
 @app.before_request
 def check_auth():
     if not is_auth_enabled():
+        return None
+
+    if request.path.startswith("/api/llm/"):
         return None
 
     if request.path.startswith("/images/") or request.path.startswith("/view/"):
@@ -1547,74 +1706,158 @@ def maintenance_thumbnails_regenerate():
 @require_auth
 @rate_limit(max_requests=20, window=60)
 def webhook_run_task():
-    if not _webhook_enabled():
-        return {"error": "Webhook tasks are disabled"}, 404
-
-    if not validate_csrf(request.headers.get("X-CSRF-Token")):
+    if is_auth_enabled() and not validate_csrf(request.headers.get("X-CSRF-Token")):
         return {"error": "Invalid CSRF token"}, 403
 
-    payload = request.get_json(silent=True) or {}
-    task = str(payload.get("task", "")).strip()
-    params = payload.get("params") or {}
+    body, status = run_configured_task(request.get_json(silent=True) or {})
+    return body, status
 
-    if not task:
-        return {"error": "task is required"}, 400
-    if not isinstance(params, dict):
-        return {"error": "params must be an object"}, 400
 
-    env_key = _task_env_key(task)
-    if not env_key:
-        return {"error": "invalid task name"}, 400
+@app.route("/api/llm/images")
+@require_api_key
+@rate_limit(max_requests=60, window=60)
+def llm_images():
+    query = request.args.get("q", "").strip().lower()
+    images = []
+    for item in iter_gallery_media():
+        rel_path = item.relative_to(DATA_FOLDER).as_posix()
+        if query and query not in rel_path.lower() and query not in item.name.lower():
+            continue
+        images.append(media_metadata(item))
+    return {"images": images, "count": len(images)}
 
-    template = os.environ.get(env_key, "").strip()
-    if not template:
-        return {"error": f"task '{task}' is not configured"}, 404
 
+@app.route("/api/llm/image/<path:relpath>")
+@require_api_key
+@rate_limit(max_requests=60, window=60)
+def llm_image(relpath: str):
+    if not sanitize_path(relpath):
+        return {"error": "Invalid path"}, 400
+    media_path = source_file_path(relpath)
+    if not media_path.exists() or not is_media_file(media_path) or is_excluded_gallery_path(media_path):
+        return {"error": "Image not found"}, 404
+    return media_metadata(media_path)
+
+
+@app.route("/api/llm/recent")
+@require_api_key
+@rate_limit(max_requests=60, window=60)
+def llm_recent():
     try:
-        command = _render_task_command(template, params)
-        argv = shlex.split(command)
-    except ValueError as exc:
-        return {"error": str(exc)}, 400
-
-    if not argv:
-        return {"error": "configured task produced an empty command"}, 500
-
-    try:
-        timeout = max(1, min(600, int(os.environ.get("WEBHOOK_TASK_TIMEOUT", "30"))))
+        limit = max(1, min(500, int(request.args.get("limit", "50"))))
     except ValueError:
-        timeout = 30
+        limit = 50
+    media = sorted(iter_gallery_media(), key=lambda p: p.stat().st_mtime, reverse=True)[:limit]
+    return {"images": [media_metadata(item) for item in media], "count": len(media)}
 
-    try:
-        completed = subprocess.run(
-            argv,
-            cwd=str(DATA_FOLDER),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        log_security_event("webhook_task", "error", task=task, reason="timeout", timeout=timeout)
-        return {"task": task, "success": False, "error": f"task timed out after {timeout}s"}, 504
-    except OSError as exc:
-        log_security_event("webhook_task", "error", task=task, reason="spawn_failed", error=str(exc))
-        return {"task": task, "success": False, "error": f"failed to execute task: {exc}"}, 500
 
-    success = completed.returncode == 0
-    log_security_event(
-        "webhook_task",
-        "success" if success else "error",
-        task=task,
-        exit_code=completed.returncode,
-    )
+@app.route("/api/llm/folders")
+@require_api_key
+@rate_limit(max_requests=60, window=60)
+def llm_folders():
+    folders = [{"rel_path": "", "name": "", "parent": None}]
+    for folder in iter_gallery_folders():
+        rel_path = folder.relative_to(DATA_FOLDER).as_posix()
+        parent = folder.parent.relative_to(DATA_FOLDER).as_posix() if folder.parent != DATA_FOLDER else ""
+        folders.append({"rel_path": rel_path, "name": folder.name, "parent": parent})
+    return {"folders": folders, "count": len(folders)}
 
-    return {
-        "task": task,
-        "success": success,
-        "exitCode": completed.returncode,
-        "stdout": completed.stdout,
-        "stderr": completed.stderr,
-    }
+
+@app.route("/api/llm/tags", methods=["POST"])
+@require_api_key
+@rate_limit(max_requests=30, window=60)
+def llm_tags():
+    payload = request.get_json(silent=True) or {}
+    rel_paths = payload.get("rel_paths") or payload.get("images") or payload.get("rel_path")
+    tags = payload.get("tags") or payload.get("tag")
+    action = str(payload.get("action", "add")).strip().lower()
+    if isinstance(rel_paths, str):
+        rel_paths = [rel_paths]
+    if isinstance(tags, str):
+        tags = [tags]
+    if not isinstance(rel_paths, list) or not isinstance(tags, list) or action not in {"add", "remove"}:
+        return {"error": "rel_paths/images, tags, and action=add|remove are required"}, 400
+    updated = []
+    for rel_path in rel_paths:
+        if not isinstance(rel_path, str) or not sanitize_path(rel_path):
+            continue
+        safe_rel_path = sanitize_rel_path(rel_path)
+        media_path = source_file_path(safe_rel_path)
+        if media_path.exists() and is_media_file(media_path) and not is_excluded_gallery_path(media_path):
+            updated.append(safe_rel_path)
+    log_security_event("llm_tags", "success", action=action, updated=len(updated), tags=[str(tag) for tag in tags])
+    return {"status": "ok", "action": action, "updated": updated, "tags": [str(tag) for tag in tags]}
+
+
+@app.route("/api/llm/delete", methods=["POST"])
+@require_api_key
+@rate_limit(max_requests=20, window=60)
+def llm_delete():
+    payload = request.get_json(silent=True) or {}
+    rel_path = str(payload.get("rel_path") or payload.get("image") or "")
+    if not rel_path or not sanitize_path(rel_path):
+        return {"error": "Valid rel_path is required"}, 400
+    safe_rel_path = sanitize_rel_path(rel_path)
+    media_path = source_file_path(safe_rel_path)
+    if not media_path.exists() or not is_media_file(media_path) or is_excluded_gallery_path(media_path):
+        return {"error": "Image not found"}, 404
+    moved = move_to_trash(media_path, DATA_FOLDER)
+    if moved:
+        remove_thumbnail_cache_for(safe_rel_path)
+    log_security_event("llm_delete", "success" if moved else "error", target=safe_rel_path)
+    return {"deleted": moved, "rel_path": safe_rel_path}, 200 if moved else 500
+
+
+@app.route("/api/llm/bulk-delete", methods=["POST"])
+@require_api_key
+@rate_limit(max_requests=10, window=60)
+def llm_bulk_delete():
+    payload = request.get_json(silent=True) or {}
+    rel_paths = payload.get("rel_paths") or payload.get("images") or []
+    if not isinstance(rel_paths, list):
+        return {"error": "rel_paths/images must be a list"}, 400
+    deleted = []
+    skipped = []
+    for rel_path in rel_paths:
+        if not isinstance(rel_path, str) or not sanitize_path(rel_path):
+            skipped.append(str(rel_path))
+            continue
+        safe_rel_path = sanitize_rel_path(rel_path)
+        media_path = source_file_path(safe_rel_path)
+        if media_path.exists() and is_media_file(media_path) and not is_excluded_gallery_path(media_path) and move_to_trash(media_path, DATA_FOLDER):
+            remove_thumbnail_cache_for(safe_rel_path)
+            deleted.append(safe_rel_path)
+        else:
+            skipped.append(safe_rel_path)
+    log_security_event("llm_bulk_delete", "success" if deleted else "noop", deleted=len(deleted), skipped=len(skipped))
+    return {"deleted": deleted, "skipped": skipped, "deleted_count": len(deleted), "skipped_count": len(skipped)}
+
+
+@app.route("/api/llm/dedup", methods=["POST"])
+@require_api_key
+@rate_limit(max_requests=5, window=60)
+def llm_dedup():
+    payload = request.get_json(silent=True) or {}
+    remove = bool(payload.get("remove") or payload.get("delete"))
+    groups = find_duplicate_media()
+    removed = []
+    if remove:
+        for group in groups:
+            for rel_path in group["duplicates"]:
+                media_path = source_file_path(str(rel_path))
+                if media_path.exists() and move_to_trash(media_path, DATA_FOLDER):
+                    remove_thumbnail_cache_for(str(rel_path))
+                    removed.append(str(rel_path))
+    log_security_event("llm_dedup", "success", groups=len(groups), removed=len(removed), dry_run=not remove)
+    return {"duplicate_groups": groups, "group_count": len(groups), "dry_run": not remove, "removed": removed}
+
+
+@app.route("/api/llm/task/run", methods=["POST"])
+@require_api_key
+@rate_limit(max_requests=10, window=60)
+def llm_task_run():
+    body, status = run_configured_task(request.get_json(silent=True) or {})
+    return body, status
 
 
 @app.route("/settings")
