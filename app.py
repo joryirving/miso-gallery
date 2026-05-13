@@ -30,6 +30,7 @@ from auth import (
     is_oidc_configured,
     oauth,
     require_api_key,
+    require_api_key_with_scope,
     require_auth,
     resolved_auth_mode,
     verify_local_password,
@@ -1714,7 +1715,7 @@ def webhook_run_task():
 
 
 @app.route("/api/llm/images")
-@require_api_key
+@require_api_key_with_scope("read")
 @rate_limit(max_requests=60, window=60)
 def llm_images():
     query = request.args.get("q", "").strip().lower()
@@ -1728,7 +1729,7 @@ def llm_images():
 
 
 @app.route("/api/llm/image/<path:relpath>")
-@require_api_key
+@require_api_key_with_scope("read")
 @rate_limit(max_requests=60, window=60)
 def llm_image(relpath: str):
     if not sanitize_path(relpath):
@@ -1740,7 +1741,7 @@ def llm_image(relpath: str):
 
 
 @app.route("/api/llm/recent")
-@require_api_key
+@require_api_key_with_scope("read")
 @rate_limit(max_requests=60, window=60)
 def llm_recent():
     try:
@@ -1752,7 +1753,7 @@ def llm_recent():
 
 
 @app.route("/api/llm/folders")
-@require_api_key
+@require_api_key_with_scope("read")
 @rate_limit(max_requests=60, window=60)
 def llm_folders():
     folders = [{"rel_path": "", "name": "", "parent": None}]
@@ -1764,7 +1765,7 @@ def llm_folders():
 
 
 @app.route("/api/llm/tags", methods=["POST"])
-@require_api_key
+@require_api_key_with_scope("read")
 @rate_limit(max_requests=30, window=60)
 def llm_tags():
     payload = request.get_json(silent=True) or {}
@@ -1790,7 +1791,7 @@ def llm_tags():
 
 
 @app.route("/api/llm/delete", methods=["POST"])
-@require_api_key
+@require_api_key_with_scope("write")
 @rate_limit(max_requests=20, window=60)
 def llm_delete():
     payload = request.get_json(silent=True) or {}
@@ -1809,7 +1810,7 @@ def llm_delete():
 
 
 @app.route("/api/llm/bulk-delete", methods=["POST"])
-@require_api_key
+@require_api_key_with_scope("write")
 @rate_limit(max_requests=10, window=60)
 def llm_bulk_delete():
     payload = request.get_json(silent=True) or {}
@@ -1834,7 +1835,7 @@ def llm_bulk_delete():
 
 
 @app.route("/api/llm/dedup", methods=["POST"])
-@require_api_key
+@require_api_key_with_scope("write")
 @rate_limit(max_requests=5, window=60)
 def llm_dedup():
     payload = request.get_json(silent=True) or {}
@@ -1853,7 +1854,7 @@ def llm_dedup():
 
 
 @app.route("/api/llm/task/run", methods=["POST"])
-@require_api_key
+@require_api_key_with_scope("read")
 @rate_limit(max_requests=10, window=60)
 def llm_task_run():
     body, status = run_configured_task(request.get_json(silent=True) or {})
