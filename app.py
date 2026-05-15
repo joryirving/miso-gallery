@@ -109,7 +109,7 @@ def log_security_event(event: str, outcome: str, *, request_id: str = "", **fiel
 
 # Configure OAuth for OIDC if enabled
 configure_oauth(app)
-THUMBNAIL_MAX_SIZE = 600
+THUMBNAIL_MAX_SIZE = 400
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
 VIDEO_EXTENSIONS = (".gif", ".mp4", ".webm", ".mov")
 FAVICON_URL = os.environ.get("FAVICON_URL", "").strip()
@@ -121,6 +121,31 @@ WEBHOOK_TASK_PREFIX = "WEBHOOK_TASK_"
 AUTO_FOLDER_COVERS_ENABLED = os.environ.get("GALLERY_AUTO_FOLDER_COVERS", "false").strip().lower() in {"1", "true", "yes", "on"}
 FOLDER_COVER_CACHE_TTL = max(int(os.environ.get("GALLERY_COVER_CACHE_TTL", "3600") or 3600), 0)
 _FOLDER_COVER_CACHE: dict[str, tuple[float, str | None]] = {}
+
+# Bounded pagination defaults for gallery endpoints
+GALLERY_PAGE_DEFAULT = 50
+GALLERY_PAGE_MAX = 500
+
+
+def _paginate(items, page=1, per_page=GALLERY_PAGE_DEFAULT):
+    """Return (paginated_items, total_count, page, per_page)."""
+    total = len(items)
+    start = (page - 1) * per_page
+    end = start + per_page
+    return items[start:end], total, page, per_page
+
+
+def _parse_pagination(args):
+    """Parse pagination query params from request.args. Returns (page, per_page)."""
+    try:
+        page = max(1, int(args.get("page", "1")))
+    except (ValueError, TypeError):
+        page = 1
+    try:
+        per_page = max(1, min(GALLERY_PAGE_MAX, int(args.get("limit", str(GALLERY_PAGE_DEFAULT)))))
+    except (ValueError, TypeError):
+        per_page = GALLERY_PAGE_DEFAULT
+    return page, per_page
 
 
 def _webhook_enabled() -> bool:
@@ -906,8 +931,12 @@ def remove_thumbnail_cache_for(rel_path: str) -> None:
                 pass
 
 
-def run_thumbnail_integrity_check() -> dict[str, int]:
-    """Check thumbnails and regenerate missing/invalid entries on demand."""
+def run_thumbnail_integrity_check(limit: int | None = None) -> dict[str, int]:
+    """Check thumbnails and regenerate missing/invalid entries on demand.
+
+    Args:
+        limit: Maximum files to scan. None means no limit.
+    """
 
     ensure_thumbnail_cache_dir()
     excluded_dirs = {THUMBNAIL_CACHE_DIR.name, ".trash"}
@@ -925,6 +954,8 @@ def run_thumbnail_integrity_check() -> dict[str, int]:
 
         rel_posix = rel_path.as_posix()
         stats["checked"] += 1
+        if limit is not None and stats["checked"] > limit:
+            break
 
         cached_name = thumbnail_filename(rel_posix, item)
         cached_path = THUMBNAIL_CACHE_DIR / cached_name
@@ -1027,9 +1058,12 @@ def media_metadata(path: Path) -> dict[str, object]:
     }
 
 
-def iter_gallery_media() -> list[Path]:
+def iter_gallery_media(limit: int | None = None) -> list[Path]:
+    """Iterate gallery media files, optionally bounded by limit."""
     media: list[Path] = []
     for item in DATA_FOLDER.rglob("*"):
+        if limit is not None and len(media) >= limit:
+            break
         try:
             if is_media_file(item) and not is_excluded_gallery_path(item):
                 media.append(item)
@@ -1038,9 +1072,12 @@ def iter_gallery_media() -> list[Path]:
     return sorted(media, key=lambda p: p.relative_to(DATA_FOLDER).as_posix().lower())
 
 
-def iter_gallery_folders() -> list[Path]:
+def iter_gallery_folders(limit: int | None = None) -> list[Path]:
+    """Iterate gallery folders, optionally bounded by limit."""
     folders: list[Path] = []
     for item in DATA_FOLDER.rglob("*"):
+        if limit is not None and len(folders) >= limit:
+            break
         try:
             if item.is_dir() and not is_excluded_gallery_path(item):
                 folders.append(item)
@@ -1692,7 +1729,11 @@ def maintenance_thumbnails_regenerate():
         log_security_event("thumb_maintenance", "denied", reason="invalid_csrf")
         return {"error": "Invalid CSRF token"}, 403
 
-    stats = run_thumbnail_integrity_check()
+    try:
+        limit = max(1, min(5000, int(request.args.get("limit", "0") or "0"))) if request.args.get("limit") else None
+    except (ValueError, TypeError):
+        limit = None
+    stats = run_thumbnail_integrity_check(limit=limit)
     log_security_event(
         "thumb_maintenance",
         "success",
@@ -1727,13 +1768,16 @@ def webhook_run_task():
 @rate_limit(max_requests=60, window=60)
 def llm_images():
     query = request.args.get("q", "").strip().lower()
-    images = []
-    for item in iter_gallery_media():
+    page, per_page = _parse_pagination(request.args)
+    all_media = iter_gallery_media()
+    filtered: list[dict[str, object]] = []
+    for item in all_media:
         rel_path = item.relative_to(DATA_FOLDER).as_posix()
         if query and query not in rel_path.lower() and query not in item.name.lower():
             continue
-        images.append(media_metadata(item))
-    return {"images": images, "count": len(images)}
+        filtered.append(media_metadata(item))
+    paginated, total, pg, pp = _paginate(filtered, page=page, per_page=per_page)
+    return {"images": paginated, "count": len(paginated), "total": total, "page": pg, "per_page": pp}
 
 
 @app.route("/api/llm/image/<path:relpath>")
@@ -1752,24 +1796,24 @@ def llm_image(relpath: str):
 @require_api_key_with_scope("read")
 @rate_limit(max_requests=60, window=60)
 def llm_recent():
-    try:
-        limit = max(1, min(500, int(request.args.get("limit", "50"))))
-    except ValueError:
-        limit = 50
-    media = sorted(iter_gallery_media(), key=lambda p: p.stat().st_mtime, reverse=True)[:limit]
-    return {"images": [media_metadata(item) for item in media], "count": len(media)}
+    page, per_page = _parse_pagination(request.args)
+    all_media = sorted(iter_gallery_media(), key=lambda p: p.stat().st_mtime, reverse=True)
+    paginated, total, pg, pp = _paginate(all_media, page=page, per_page=per_page)
+    return {"images": [media_metadata(item) for item in paginated], "count": len(paginated), "total": total, "page": pg, "per_page": pp}
 
 
 @app.route("/api/llm/folders")
 @require_api_key_with_scope("read")
 @rate_limit(max_requests=60, window=60)
 def llm_folders():
-    folders = [{"rel_path": "", "name": "", "parent": None}]
+    page, per_page = _parse_pagination(request.args)
+    all_folders = [{"rel_path": "", "name": "", "parent": None}]
     for folder in iter_gallery_folders():
         rel_path = folder.relative_to(DATA_FOLDER).as_posix()
         parent = folder.parent.relative_to(DATA_FOLDER).as_posix() if folder.parent != DATA_FOLDER else ""
-        folders.append({"rel_path": rel_path, "name": folder.name, "parent": parent})
-    return {"folders": folders, "count": len(folders)}
+        all_folders.append({"rel_path": rel_path, "name": folder.name, "parent": parent})
+    paginated, total, pg, pp = _paginate(all_folders, page=page, per_page=per_page)
+    return {"folders": paginated, "count": len(paginated), "total": total, "page": pg, "per_page": pp}
 
 
 @app.route("/api/llm/tags", methods=["POST"])
@@ -1857,7 +1901,13 @@ def llm_bulk_delete():
 def llm_dedup():
     payload = request.get_json(silent=True) or {}
     remove = bool(payload.get("remove") or payload.get("delete"))
+    try:
+        limit = max(1, min(100, int(payload.get("limit", "0") or "0"))) if payload.get("limit") else None
+    except (ValueError, TypeError):
+        limit = None
     groups = find_duplicate_media()
+    if limit is not None:
+        groups = groups[:limit]
     removed = []
     if remove:
         for group in groups:
